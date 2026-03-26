@@ -22,6 +22,14 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="DXClusterSpots.py" />
+    <Compile Include="cli.py" />
+    <Compile Include="dxcluster\__init__.py" />
+    <Compile Include="dxcluster\bands.py" />
+    <Compile Include="dxcluster\client.py" />
+    <Compile Include="dxcluster\feed.py" />
+    <Compile Include="dxcluster\filters.py" />
+    <Compile Include="dxcluster\models.py" />
+    <Compile Include="dxcluster\parser.py" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
