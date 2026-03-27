@@ -464,11 +464,24 @@ class InteractiveShell:
                 sys.stdout.write(f"\r{line}\n{_PROMPT}")
                 sys.stdout.flush()
         except asyncio.CancelledError:
+            # Normal stop – task cancelled by _stop_stream or app shutdown.
             pass
+        except ConnectionError as exc:
+            # DNS failure or other permanent connection error.
+            self._print(f"")
+            self._print(f"  Connection failed: {exc}")
+            self._print(f"  Stream stopped.  Type 'nodes' to see known nodes,")
+            self._print(f"  or 'connect <hostname> [callsign]' to try another.")
+            self._connected = False
+        except OSError as exc:
+            self._print(f"")
+            self._print(f"  Network error: {exc}")
+            self._print(f"  Stream stopped.  Type 'stream' to retry.")
         except Exception as exc:
-            self._print(f"Stream error: {exc}")
+            self._print(f"Stream error: {type(exc).__name__}: {exc}")
         finally:
             self._streaming = False
+            self._stream_task = None
 
     # ── Output helper ─────────────────────────────────────────────────────────
 

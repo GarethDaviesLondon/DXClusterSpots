@@ -12,8 +12,9 @@ from typing import AsyncIterator, Optional
 logger = logging.getLogger(__name__)
 
 _LOGIN_KEYWORDS = ("login", "call", "enter your", "please enter")
-_LOGIN_TIMEOUT = 30.0   # seconds to wait for a login prompt
-_LINE_TIMEOUT = 120.0   # seconds before sending a keepalive
+_CONNECT_TIMEOUT = 10.0  # seconds to wait for the TCP connection to be established
+_LOGIN_TIMEOUT = 30.0    # seconds to wait for a login prompt after connecting
+_LINE_TIMEOUT = 120.0    # seconds before sending a keepalive
 _KEEPALIVE_CMD = "sh/dx 1"  # ask for 1 recent spot as a keepalive
 
 
@@ -41,7 +42,10 @@ class DXClusterClient:
 
     async def connect(self) -> None:
         logger.info("Connecting to %s:%d as %s", self.host, self.port, self.callsign)
-        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port),
+            timeout=_CONNECT_TIMEOUT,
+        )
         self._connected = True
         await self._do_login()
         logger.info("Connected and logged in to %s", self.host)

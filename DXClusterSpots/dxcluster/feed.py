@@ -18,6 +18,7 @@ each opening a separate telnet connection.
 
 import asyncio
 import logging
+import socket
 from typing import AsyncIterator, Callable, Optional
 
 from .client import DXClusterClient
@@ -126,18 +127,37 @@ class SpotFeed:
 
                         yield spot
 
+            except asyncio.CancelledError:
+                # Task was cancelled (e.g. stream stop, app shutdown) – exit cleanly.
+                raise
+
+            except socket.gaierror as exc:
+                # DNS resolution failure – retrying won't help until the hostname
+                # is corrected, so raise immediately as a ConnectionError so the
+                # caller (e.g. the interactive shell) can surface a clear message.
+                raise ConnectionError(
+                    f"Cannot resolve hostname '{self.host}' – "
+                    f"check the address is correct. ({exc})"
+                ) from exc
+
             except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
                 logger.warning("Connection lost (%s): %s", self.host, exc)
-                if not self.reconnect:
+                if not self.reconnect or not self._running:
                     break
                 logger.info("Reconnecting in %.0fs…", self.reconnect_delay)
-                await asyncio.sleep(self.reconnect_delay)
+                try:
+                    await asyncio.sleep(self.reconnect_delay)
+                except asyncio.CancelledError:
+                    raise
 
             except Exception as exc:
                 logger.error("Unexpected error: %s", exc, exc_info=True)
-                if not self.reconnect:
+                if not self.reconnect or not self._running:
                     break
-                await asyncio.sleep(self.reconnect_delay)
+                try:
+                    await asyncio.sleep(self.reconnect_delay)
+                except asyncio.CancelledError:
+                    raise
 
     def stop(self) -> None:
         """Signal the feed to stop after the next spot."""
