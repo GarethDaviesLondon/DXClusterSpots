@@ -207,8 +207,8 @@ def main() -> None:
     )
 
     if use_interactive:
-        from interactive import InteractiveShell
-        sys.exit(asyncio.run(InteractiveShell().run()))
+        from tui import DXClusterTUI
+        sys.exit(asyncio.run(DXClusterTUI().run()))
     else:
         sys.exit(asyncio.run(_stream(args)))
 

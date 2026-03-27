@@ -24,9 +24,12 @@
     <Compile Include="DXClusterSpots.py" />
     <Compile Include="cli.py" />
     <Compile Include="interactive.py" />
+    <Compile Include="tui.py" />
     <Compile Include="dxcluster\__init__.py" />
     <Compile Include="dxcluster\bands.py" />
     <Compile Include="dxcluster\client.py" />
+    <Compile Include="dxcluster\config.py" />
+    <Compile Include="dxcluster\dxcc.py" />
     <Compile Include="dxcluster\feed.py" />
     <Compile Include="dxcluster\filters.py" />
     <Compile Include="dxcluster\models.py" />

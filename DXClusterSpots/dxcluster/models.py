@@ -20,6 +20,7 @@ class DXSpot:
     comment: str          # free-text comment from the spotter
     time_str: str         # UTC time string from the cluster, e.g. "1234Z"
     band: Optional[str] = None   # derived band name, e.g. "20m"
+    mode: Optional[str] = None   # derived operating mode, e.g. "CW", "FT8"
     raw: str = ""                # original unparsed line
     received_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -36,6 +37,7 @@ class DXSpot:
             "comment": self.comment,
             "time_str": self.time_str,
             "band": self.band,
+            "mode": self.mode,
             "received_at": self.received_at.isoformat(),
         }
 
@@ -49,8 +51,10 @@ class DXSpot:
 
     def __str__(self) -> str:
         band_tag = f"[{self.band}]" if self.band else "[?]  "
+        mode_tag = f" {self.mode}" if self.mode else ""
         return (
-            f"{band_tag:<7} "
+            f"{band_tag:<7}"
+            f"{mode_tag:<6} "
             f"DX de {self.spotter:<12} "
             f"{self.frequency:>9.1f} kHz  "
             f"{self.dx_callsign:<12} "
