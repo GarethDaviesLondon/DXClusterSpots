@@ -40,8 +40,13 @@ def config_path() -> str:
 
 
 def history_path() -> str:
-    """Return the full path to the command history file."""
-    return os.path.join(_config_dir(), "history.txt")
+    """Return the full path to the command history file, creating the dir if needed."""
+    path = os.path.join(_config_dir(), "history.txt")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        pass
+    return path
 
 
 # ---------------------------------------------------------------------------
