@@ -23,6 +23,7 @@
   <ItemGroup>
     <Compile Include="DXClusterSpots.py" />
     <Compile Include="cli.py" />
+    <Compile Include="interactive.py" />
     <Compile Include="dxcluster\__init__.py" />
     <Compile Include="dxcluster\bands.py" />
     <Compile Include="dxcluster\client.py" />

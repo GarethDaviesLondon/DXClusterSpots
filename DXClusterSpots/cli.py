@@ -1,7 +1,9 @@
 """Command-line interface for DXClusterSpots.
 
-Usage examples
---------------
+Running with no --node / --host argument launches the interactive shell.
+
+Non-interactive (pipe-friendly) usage examples
+-----------------------------------------------
 # Stream all spots from a known node:
     python DXClusterSpots.py --node gb7mbc --callsign G0ABC
 
@@ -16,6 +18,9 @@ Usage examples
 
 # Grab 10 spots then exit:
     python DXClusterSpots.py --node gb7mbc --callsign G0ABC --count 10
+
+# Launch the interactive shell explicitly:
+    python DXClusterSpots.py --interactive
 """
 
 import argparse
@@ -31,16 +36,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dxcluster",
         description=(
-            "Stream DX spots from a DXCluster telnet node.\n\n"
+            "DXCluster spot client.\n\n"
+            "Run with no arguments to launch the interactive shell.\n"
+            "Supply --node or --host for a non-interactive streaming session.\n\n"
             f"Known nodes: {', '.join(KNOWN_CLUSTERS.keys())}\n"
             f"Known bands: {', '.join(BAND_PLAN.keys())}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # Connection
-    conn = parser.add_argument_group("connection")
-    node_group = conn.add_mutually_exclusive_group(required=True)
+    # Mode
+    parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Launch the interactive shell (default when no --node/--host given)",
+    )
+
+    # Connection (both optional – omitting both triggers interactive mode)
+    conn = parser.add_argument_group("connection (non-interactive mode)")
+    node_group = conn.add_mutually_exclusive_group()
     node_group.add_argument(
         "--node", "-n",
         choices=list(KNOWN_CLUSTERS.keys()),
@@ -71,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Filtering
-    filt = parser.add_argument_group("filters")
+    filt = parser.add_argument_group("filters (non-interactive mode)")
     filt.add_argument(
         "--band", "-b",
         nargs="+",
@@ -98,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Output
-    out = parser.add_argument_group("output")
+    out = parser.add_argument_group("output (non-interactive mode)")
     out.add_argument(
         "--count", "-N",
         type=int, default=0,
@@ -120,17 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _stream(args: argparse.Namespace) -> int:
-    # Resolve host/port
+    """Non-interactive streaming mode."""
     if args.node:
         host, port = KNOWN_CLUSTERS[args.node]
     else:
         host = args.host
         port = args.port
 
-    # Build filter
     spot_filter: Optional[SpotFilter] = None
-    has_filters = any([args.band, args.dx_prefix, args.spotter_prefix, args.comment])
-    if has_filters:
+    if any([args.band, args.dx_prefix, args.spotter_prefix, args.comment]):
         spot_filter = SpotFilter()
         if args.band:
             spot_filter.band(*args.band)
@@ -150,22 +162,19 @@ async def _stream(args: argparse.Namespace) -> int:
     )
 
     if not args.json:
-        filter_desc = []
+        parts = []
         if args.band:
-            filter_desc.append(f"band={','.join(args.band)}")
+            parts.append(f"band={','.join(args.band)}")
         if args.dx_prefix:
-            filter_desc.append(f"dx-prefix={','.join(args.dx_prefix)}")
-        suffix = f"  [{' | '.join(filter_desc)}]" if filter_desc else ""
+            parts.append(f"dx-prefix={','.join(args.dx_prefix)}")
+        suffix = f"  [{' | '.join(parts)}]" if parts else ""
         print(f"Connecting to {host}:{port} as {args.callsign}{suffix}")
         print("-" * 80)
 
     count = 0
     try:
         async for spot in feed.spots():
-            if args.json:
-                print(spot.to_json(), flush=True)
-            else:
-                print(spot, flush=True)
+            print(spot.to_json() if args.json else str(spot), flush=True)
             count += 1
             if args.count and count >= args.count:
                 feed.stop()
@@ -187,7 +196,14 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    sys.exit(asyncio.run(_stream(args)))
+    # Decide mode: interactive shell vs. direct streaming
+    use_interactive = args.interactive or (not args.node and not args.host)
+
+    if use_interactive:
+        from interactive import InteractiveShell
+        sys.exit(asyncio.run(InteractiveShell().run()))
+    else:
+        sys.exit(asyncio.run(_stream(args)))
 
 
 if __name__ == "__main__":
