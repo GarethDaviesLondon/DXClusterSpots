@@ -429,6 +429,12 @@ class InteractiveShell:
     # ── Stream management ─────────────────────────────────────────────────────
 
     async def _start_stream(self) -> None:
+        if self._callsign == "NOCALL":
+            self._print(
+                "Warning: your callsign is set to NOCALL.\n"
+                "  Most clusters reject NOCALL and will close the connection immediately.\n"
+                "  Use:  connect <node> <your-callsign>  to reconnect with a real callsign."
+            )
         self._feed = SpotFeed(
             host=self._host,
             port=self._port,

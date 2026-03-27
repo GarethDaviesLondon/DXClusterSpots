@@ -190,14 +190,21 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.verbose else logging.WARNING
+    # Decide mode: interactive shell vs. direct streaming
+    use_interactive = args.interactive or (not args.node and not args.host)
+
+    if use_interactive:
+        # In interactive mode the shell surfaces errors itself; suppress library
+        # log output so it doesn't bleed raw text into the shell UI.
+        # --verbose overrides this and shows DEBUG logs for troubleshooting.
+        log_level = logging.DEBUG if args.verbose else logging.ERROR
+    else:
+        log_level = logging.DEBUG if args.verbose else logging.WARNING
+
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-
-    # Decide mode: interactive shell vs. direct streaming
-    use_interactive = args.interactive or (not args.node and not args.host)
 
     if use_interactive:
         from interactive import InteractiveShell

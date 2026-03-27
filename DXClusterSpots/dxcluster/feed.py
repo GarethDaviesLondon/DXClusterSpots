@@ -161,6 +161,16 @@ class SpotFeed:
 
                         yield spot
 
+                # The async-with block exited cleanly (server closed the
+                # connection without raising an exception).  Sleep before
+                # reconnecting so we don't hammer the server.
+                if self._running and self.reconnect:
+                    logger.info(
+                        "Connection to %s closed by server, reconnecting in %.0fs…",
+                        self.host, self.reconnect_delay,
+                    )
+                    await asyncio.sleep(self.reconnect_delay)
+
             except asyncio.CancelledError:
                 # Task was cancelled (e.g. stream stop, app shutdown) – exit cleanly.
                 raise

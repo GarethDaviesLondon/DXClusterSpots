@@ -101,7 +101,7 @@ class DXClusterClient:
             try:
                 raw = await asyncio.wait_for(self._reader.readline(), timeout=_LINE_TIMEOUT)
                 if not raw:
-                    logger.warning("Server closed connection")
+                    logger.info("Server closed connection to %s", self.host)
                     break
                 yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
             except asyncio.TimeoutError:
