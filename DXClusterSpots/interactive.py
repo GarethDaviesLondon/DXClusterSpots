@@ -80,6 +80,8 @@ _HELP: dict[str, str] = {
         "  Subcommands:\n"
         "    filter band   <band...>    - accept only spots on these band(s)\n"
         "                                 e.g.  filter band 20m 40m\n"
+        "    filter mode   <mode...>   - accept only these modes (CW, SSB, FT8 …)\n"
+        "                                 e.g.  filter mode CW FT8\n"
         "    filter dx     <prefix...>  - DX callsign starts with prefix\n"
         "                                 e.g.  filter dx VK ZL\n"
         "    filter spotter <prefix...> - spotter callsign starts with prefix\n"
@@ -315,7 +317,7 @@ class InteractiveShell:
     async def _cmd_filter(self, args: list[str]) -> None:
         if not args:
             self._print(
-                "Usage: filter <band|dx|spotter|comment|show|clear> [values...]"
+                "Usage: filter <band|mode|dx|spotter|comment|show|clear> [values...]"
             )
             return
 
@@ -349,6 +351,9 @@ class InteractiveShell:
         if sub == "band":
             self._filter.band(*values)
             self._filter_desc.append(f"band:    {', '.join(v.lower() for v in values)}")
+        elif sub == "mode":
+            self._filter.mode(*[v.upper() for v in values])
+            self._filter_desc.append(f"mode:    {', '.join(v.upper() for v in values)}")
         elif sub == "dx":
             self._filter.dx_callsign_prefix(*values)
             self._filter_desc.append(f"dx-pfx:  {', '.join(v.upper() for v in values)}")
@@ -361,7 +366,7 @@ class InteractiveShell:
         else:
             self._print(
                 f"Unknown filter type '{sub}'.  "
-                "Use: band, dx, spotter, comment, show, clear"
+                "Use: band, mode, dx, spotter, comment, show, clear"
             )
             return
 

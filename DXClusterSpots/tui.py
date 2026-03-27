@@ -1,36 +1,40 @@
-"""Enhanced interactive TUI using prompt_toolkit.
+"""DXClusterSpots – split-pane terminal UI.
 
-Key improvements over the plain interactive.py shell:
+Layout (full-screen):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  SPOT OUTPUT PANE  (scrolling, coloured, auto-scroll to bottom) │
+  │  [20m] FT8   DX de SP5XYZ      14074.0 kHz  4X4DK   cq cq     │
+  │  ...                                                            │
+  ├── ▶ streaming │ pi4cc:7300 (ON4KST) │ 42 spots │ band:20m ─────┤
+  │ dxcluster> _                                                    │
+  └─────────────────────────────────────────────────────────────────┘
 
-* Spots are printed ABOVE the command prompt, which stays fixed at the
-  bottom of the terminal (via patch_stdout).  Command input and spot
-  output are truly separated.
-* Band-coloured output – each band has a distinct ANSI colour.
-* Mode label shown for every spot (CW / FT8 / SSB / …).
-* Tab-completion and persistent command history (stored in the config dir).
-* Persistent configuration: connection, filters, and worked/exclude list
-  survive between sessions.
-* Auto-resume: if a valid last connection is found in config, the shell
-  connects and starts streaming automatically on launch.
-* `worked`/`w <prefix>` – add a country to the exclude list in one keystroke.
-* `filter dx include/exclude` with full DXCC entity expansion
-  (G → also G, M, 2E; ON → also OO, OP, OR, OS, OT …).
+Top pane  : spot output – auto-scrolls as spots arrive, keeps last 2 000 lines.
+Status bar: live connection state, active filters, spot count.
+Input pane: command prompt with tab-completion and persistent history.
+
+Filters, connection settings, and the worked/exclude list all survive
+between sessions (stored in the platform config directory).
 
 Requires: prompt_toolkit>=3.0  (pip install prompt_toolkit)
-Falls back gracefully to the plain interactive.py shell if unavailable.
+Falls back to interactive.py if prompt_toolkit is unavailable.
 """
 
 import asyncio
+import shutil
 import sys
 from typing import Optional
 
 try:
-    from prompt_toolkit import PromptSession, print_formatted_text
+    from prompt_toolkit import Application
     from prompt_toolkit.completion import WordCompleter
-    from prompt_toolkit.formatted_text import FormattedText, HTML
     from prompt_toolkit.history import FileHistory, InMemoryHistory
-    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import TextArea
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
@@ -40,10 +44,10 @@ from dxcluster.config import (
     AppConfig, FilterConfig, load_config, save_config,
     config_path as config_file_path, history_path,
 )
-from dxcluster.dxcc import all_prefixes_for, describe_entity, resolve_entity
+from dxcluster.dxcc import describe_entity
 from dxcluster.filters import build_filter_from_config
 
-# ── ANSI colour palette ──────────────────────────────────────────────────────
+# ── Colour palette ────────────────────────────────────────────────────────────
 
 _BAND_COLOURS: dict[str, str] = {
     "160m": "ansimagenta",
@@ -80,13 +84,14 @@ _MODE_COLOURS: dict[str, str] = {
     "FM":     "ansiwhite",
 }
 
-_PROMPT_TOOLKIT_STYLE = Style.from_dict({
-    "prompt":       "ansiwhite bold",
+_STYLE = Style.from_dict({
+    "status":     "bg:ansiblue ansiwhite bold",
+    "separator":  "ansidarkgray",
     "completion-menu.completion":         "bg:ansiblue ansiwhite",
     "completion-menu.completion.current": "bg:ansibrightblue ansiwhite bold",
-})
+}) if HAS_PROMPT_TOOLKIT else None
 
-# ── Commands ─────────────────────────────────────────────────────────────────
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
@@ -98,10 +103,10 @@ _HELP: dict[str, str] = {
     "connect": (
         "connect <node|hostname> [callsign] [port]\n"
         "\n"
-        "  Connect to a DXCluster node.\n"
-        "    node      - known node name (see 'nodes')\n"
-        "    callsign  - YOUR callsign for login\n"
-        "    port      - telnet port (default 7300)\n"
+        "  Connect to a DXCluster node.  Settings are saved automatically.\n"
+        "    node      – known node name (see 'nodes')\n"
+        "    callsign  – YOUR callsign for login\n"
+        "    port      – telnet port (default 7300)\n"
         "\n"
         "  Examples:\n"
         "    connect g6nhu ON4XXX\n"
@@ -112,92 +117,75 @@ _HELP: dict[str, str] = {
         "filter <subcommand> [values...]\n"
         "\n"
         "  Subcommands:\n"
-        "    filter band   <band...>         20m, 40m, 80m ...\n"
-        "    filter mode   <mode...>         CW, SSB, FT8, RTTY, DIGI ...\n"
-        "    filter dx include <prefix...>   show ONLY these DXCC entities\n"
-        "    filter dx exclude <prefix...>   hide these DXCC entities\n"
-        "    filter spotter <prefix...>      only show spots from these spotters\n"
-        "    filter comment <keyword...>     comment contains keyword\n"
-        "    filter show                     display active filters\n"
-        "    filter clear                    remove all filters\n"
+        "    filter band   <band...>          20m, 40m, 80m …\n"
+        "    filter mode   <mode...>          CW, SSB, FT8, RTTY, DIGI …\n"
+        "    filter dx include <prefix...>    show ONLY these DXCC entities\n"
+        "    filter dx exclude <prefix...>    hide these DXCC entities\n"
+        "    filter show                      display active filters\n"
+        "    filter clear                     remove all filters\n"
         "\n"
         "  DXCC entity resolution:\n"
-        "    'G' matches England: G, M, 2E\n"
-        "    'ON' matches Belgium: ON, OO, OP, OQ, OR, OS, OT\n"
-        "    'DL' matches Germany: DA, DB, DC ... DR\n"
+        "    'G'  → England  : G, M, 2E\n"
+        "    'ON' → Belgium  : ON, OO, OP, OQ, OR, OS, OT\n"
+        "    'DL' → Germany  : DA, DB, DC … DR\n"
+        "\n"
+        "  Filters are saved and reloaded on next start."
     ),
     "worked": (
         "worked <prefix...>  (alias: w)\n"
         "\n"
-        "  Add a DXCC entity to the exclude list (worked/hide).\n"
-        "  Understands DXCC entities:\n"
-        "    worked G    → hides G, M, 2E (all England)\n"
-        "    worked ON   → hides ON, OO, OP, OR, OS, OT (all Belgium)\n"
-        "  The exclude list is saved and persists between sessions.\n"
+        "  Add a DXCC entity to the exclude list.\n"
+        "  Resolves full entity prefix set:\n"
+        "    worked G    → hides G, M, 2E (England)\n"
+        "    worked ON   → hides ON, OO, OP … (Belgium)\n"
+        "  Saved automatically, persists between sessions.\n"
         "  Use 'filter dx include <prefix>' to undo."
-    ),
-    "include": (
-        "include <prefix...>\n"
-        "\n"
-        "  Add a DXCC entity to the include list (whitelist).\n"
-        "  When any includes are set, ONLY those entities are shown.\n"
-        "  The list is saved and persists between sessions.\n"
-        "  Use 'filter clear' to remove all includes."
-    ),
-    "exclude": (
-        "exclude <prefix...>\n"
-        "\n"
-        "  Add a DXCC entity to the exclude list (blacklist).\n"
-        "  Equivalent to 'worked'.  Persists between sessions."
     ),
     "stream": (
         "stream [start|stop]\n"
         "\n"
-        "  Toggle spot streaming.  Requires an active connection.\n"
-        "  Streaming resumes automatically on the next launch."
+        "  Toggle spot streaming (requires active connection)."
     ),
     "status": "status\n\n  Show connection, filter, and session statistics.",
-    "json":    "json [on|off]\n\n  Toggle NDJSON output (one JSON object per spot).",
-    "save":    "save\n\n  Save current settings to disk immediately.",
-    "config":  "config\n\n  Show the path of the config file.",
-    "nodes":   "nodes\n\n  List all known DXCluster nodes.",
-    "bands":   "bands\n\n  Display the band plan with frequency ranges.",
-    "quit":    "quit / exit / q\n\n  Stop streaming and exit.",
+    "json":   "json [on|off]\n\n  Toggle NDJSON output (one JSON object per spot).",
+    "nodes":  "nodes\n\n  List all known DXCluster nodes.",
+    "bands":  "bands\n\n  Display the band plan with frequency ranges.",
+    "save":   "save\n\n  Save current settings to disk immediately.",
+    "config": "config\n\n  Show the path of the config file.",
+    "quit":   "quit / exit / q\n\n  Stop streaming and exit.",
 }
+
+_MAX_OUTPUT_LINES = 2000  # lines kept in memory
+_OUTPUT_PANE_OVERHEAD = 3  # status bar + separator + input line
+
 
 # ── Spot formatter ────────────────────────────────────────────────────────────
 
-def _format_spot(spot, json_mode: bool) -> str | FormattedText:
-    """Return either a plain string or a FormattedText for coloured output."""
-    if json_mode:
-        return spot.to_json()
-
-    if not HAS_PROMPT_TOOLKIT:
-        return str(spot)
-
-    band_colour  = _BAND_COLOURS.get(spot.band or "", "ansiwhite")
-    mode_colour  = _MODE_COLOURS.get(spot.mode or "", "ansigray")
-    band_tag     = f"[{spot.band}]" if spot.band else "[?]  "
-    mode_tag     = f" {spot.mode}" if spot.mode else ""
-
-    return FormattedText([
-        (band_colour,          f"{band_tag:<7}"),
-        (mode_colour,          f"{mode_tag:<6} "),
-        ("ansiwhite",           f"DX de {spot.spotter:<12} "),
-        ("ansibrightyellow",   f"{spot.frequency:>9.1f} kHz  "),
-        ("ansiwhite",          f"{spot.dx_callsign:<12} "),
-        ("ansiwhite",          f"{spot.comment:<33} "),
-        ("ansigray",           spot.time_str),
-    ])
+def _format_spot_parts(spot) -> list:
+    """Return a list of (style, text) tuples for one spot line."""
+    band_colour = _BAND_COLOURS.get(spot.band or "", "ansiwhite")
+    mode_colour = _MODE_COLOURS.get(spot.mode or "", "ansigray")
+    band_tag    = f"[{spot.band}]" if spot.band else "[?]  "
+    mode_tag    = f"{spot.mode}" if spot.mode else ""
+    return [
+        (band_colour,        f"{band_tag:<7}"),
+        (mode_colour,        f"{mode_tag:<5} "),
+        ("ansiwhite",        f"DX de {spot.spotter:<12} "),
+        ("ansibrightyellow", f"{spot.frequency:>9.1f} kHz  "),
+        ("ansiwhite",        f"{spot.dx_callsign:<12} "),
+        ("ansigray",         f"{spot.comment:<33} "),
+        ("ansidarkgray",     spot.time_str),
+    ]
 
 
 # ── Main TUI class ────────────────────────────────────────────────────────────
 
 class DXClusterTUI:
-    """Interactive shell that separates spot output from command input.
+    """Split-pane terminal interface built on prompt_toolkit Application.
 
-    Uses prompt_toolkit's patch_stdout so spots are printed above the
-    prompt line, which stays fixed at the bottom of the terminal.
+    Output pane (top)  – spots stream here, auto-scrolls to latest.
+    Status bar         – live connection/filter summary.
+    Input pane (bottom)– command line with history and tab-completion.
     """
 
     def __init__(self) -> None:
@@ -207,59 +195,193 @@ class DXClusterTUI:
         self._streaming: bool = False
         self._spot_count: int = 0
         self._json_mode: bool = self._cfg.json_mode
+        self._app: Optional[Application] = None
+
+        # Each entry: list of (style, text) tuples for one output line
+        self._output_lines: list[list] = []
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
     async def run(self) -> None:
         if HAS_PROMPT_TOOLKIT:
-            await self._run_with_prompt_toolkit()
+            await self._run_split_pane()
         else:
-            self._print("prompt_toolkit not installed – falling back to plain shell.")
-            self._print("Install it with:  pip install prompt_toolkit")
-            self._print("")
+            print("prompt_toolkit not installed.  Install with:  pip install prompt_toolkit")
+            print("Falling back to plain interactive shell.")
             from interactive import InteractiveShell
             await InteractiveShell().run()
 
-    async def _run_with_prompt_toolkit(self) -> None:
+    # ── Split-pane Application ────────────────────────────────────────────────
+
+    async def _run_split_pane(self) -> None:
         try:
             hist = FileHistory(history_path())
         except Exception:
             hist = InMemoryHistory()
 
-        completer = WordCompleter(_ALL_COMMANDS, ignore_case=True)
-        session: PromptSession = PromptSession(
-            completer=completer,
+        completer = WordCompleter(
+            _ALL_COMMANDS + list(KNOWN_CLUSTERS.keys()),
+            ignore_case=True,
+            sentence=True,
+        )
+
+        # ── Output pane (FormattedTextControl) ───────────────────────────────
+        def get_output_text():
+            # Determine how many lines the output pane can show.
+            try:
+                rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
+            except Exception:
+                rows = 40
+            visible = max(5, rows)
+            lines = self._output_lines[-visible:]
+            result = []
+            for i, parts in enumerate(lines):
+                if i > 0:
+                    result.append(("", "\n"))
+                result.extend(parts)
+            return result
+
+        output_window = Window(
+            content=FormattedTextControl(get_output_text),
+            wrap_lines=False,
+            dont_extend_height=False,
+        )
+
+        # ── Status bar ────────────────────────────────────────────────────────
+        def get_status_text():
+            c = self._cfg.connection
+            conn = f"{c.host}:{c.port} ({c.callsign})" if c.host else "not connected"
+            state = "▶ streaming" if self._streaming else "■ stopped"
+            f = self._cfg.filters
+            parts = []
+            if f.bands:
+                parts.append("band:" + ",".join(sorted(f.bands)))
+            if f.modes:
+                parts.append("mode:" + ",".join(sorted(f.modes)))
+            if f.include_prefixes:
+                parts.append(f"include({len(f.include_prefixes)})")
+            if f.exclude_prefixes:
+                parts.append(f"exclude({len(f.exclude_prefixes)})")
+            filters_str = "  │  " + "  ".join(parts) if parts else ""
+            return [("class:status",
+                     f" {state}  │  {conn}  │  {self._spot_count} spots"
+                     f"{filters_str}  │  Ctrl-D quit ")]
+
+        status_window = Window(
+            content=FormattedTextControl(get_status_text),
+            height=1,
+            style="class:status",
+        )
+
+        separator = Window(height=1, char="─", style="class:separator")
+
+        # ── Input pane (TextArea) ─────────────────────────────────────────────
+        input_field = TextArea(
+            height=1,
+            prompt="dxcluster> ",
+            multiline=False,
             history=hist,
-            style=_PROMPT_TOOLKIT_STYLE,
+            completer=completer,
+            accept_handler=self._make_accept_handler(),
+        )
+        self._input_field = input_field
+
+        # ── Layout ────────────────────────────────────────────────────────────
+        layout = Layout(
+            HSplit([output_window, status_window, separator, input_field]),
+            focused_element=input_field,
+        )
+
+        # ── Key bindings ──────────────────────────────────────────────────────
+        kb = KeyBindings()
+
+        @kb.add("c-d")
+        def _exit(event):
+            event.app.exit()
+
+        @kb.add("c-c")
+        def _clear(event):
+            input_field.buffer.reset()
+
+        # ── Application ───────────────────────────────────────────────────────
+        self._app = Application(
+            layout=layout,
+            key_bindings=kb,
+            full_screen=True,
+            style=_STYLE,
             mouse_support=False,
         )
 
+        # Show banner and loaded state
         self._print_banner()
 
         # Auto-resume last session
         if self._cfg.has_connection() and self._cfg.auto_stream:
+            c = self._cfg.connection
             self._print(
-                f"Resuming last session: {self._cfg.connection.host}:{self._cfg.connection.port}"
-                f" as {self._cfg.connection.callsign}"
+                f"Resuming last session: {c.host}:{c.port} as {c.callsign}"
             )
-            await self._start_stream()
+            asyncio.ensure_future(self._start_stream())
 
-        with patch_stdout():
-            while True:
-                try:
-                    line = await session.prompt_async("dxcluster> ")
-                    await self._dispatch(line.strip())
-                except KeyboardInterrupt:
-                    continue          # Ctrl-C clears the line, not exit
-                except EOFError:
-                    break             # Ctrl-D exits
-                except SystemExit:
-                    break
+        await self._app.run_async()
 
+        # Teardown
         await self._stop_stream(silent=True)
         self._cfg.json_mode = self._json_mode
         save_config(self._cfg)
         print("\nGoodbye. 73 de DXClusterSpots")
+
+    def _make_accept_handler(self):
+        """Return the accept_handler for the input TextArea."""
+        def accept(buf):
+            text = buf.text.strip()
+            if text:
+                self._print(f"dxcluster> {text}")
+                asyncio.ensure_future(self._dispatch(text))
+            return True  # clear the input buffer
+        return accept
+
+    # ── Output helpers ────────────────────────────────────────────────────────
+
+    def _write_line(self, parts: list) -> None:
+        """Append a coloured line (list of (style, text) tuples) to the output pane."""
+        self._output_lines.append(parts)
+        # Keep memory bounded
+        if len(self._output_lines) > _MAX_OUTPUT_LINES:
+            del self._output_lines[:500]
+        if self._app:
+            self._app.invalidate()
+
+    def _print(self, msg: str = "") -> None:
+        """Append a plain text message to the output pane."""
+        self._write_line([("", msg)])
+
+    def _print_banner(self) -> None:
+        banner = [
+            "╔══════════════════════════════════════════════════════════════╗",
+            "║            DXClusterSpots  –  Split-Pane Shell              ║",
+            "║  Tab=complete  ↑/↓=history  Ctrl-C=clear  Ctrl-D=quit      ║",
+            "╚══════════════════════════════════════════════════════════════╝",
+            "Type 'help' for commands,  'nodes' to list cluster servers.",
+            "",
+        ]
+        for line in banner:
+            self._print(line)
+
+        if self._cfg.filters.exclude_prefixes:
+            n = len(self._cfg.filters.exclude_prefixes)
+            self._write_line([("ansiyellow",
+                f"Worked/exclude list loaded: {n} ent{'ities' if n != 1 else 'ity'}"
+                "  (type 'filter show' to review)"
+            )])
+        if self._cfg.filters.bands or self._cfg.filters.modes:
+            f = self._cfg.filters
+            parts = []
+            if f.bands:  parts.append("band:" + ",".join(sorted(f.bands)))
+            if f.modes:  parts.append("mode:" + ",".join(sorted(f.modes)))
+            self._write_line([("ansicyan",
+                "Active filters: " + "  ".join(parts)
+            )])
 
     # ── Dispatcher ────────────────────────────────────────────────────────────
 
@@ -268,7 +390,6 @@ class DXClusterTUI:
             return
         parts = line.split()
         cmd, args = parts[0].lower(), parts[1:]
-
         table = {
             "help":       self._cmd_help,
             "connect":    self._cmd_connect,
@@ -295,14 +416,15 @@ class DXClusterTUI:
         else:
             self._print(f"Unknown command '{cmd}'.  Type 'help' for a list.")
 
-    # ── Commands ──────────────────────────────────────────────────────────────
+    # ── Command handlers ──────────────────────────────────────────────────────
 
     async def _cmd_help(self, args: list[str]) -> None:
         if args:
             topic = args[0].lower()
             if topic in _HELP:
                 self._print("")
-                self._print(_HELP[topic])
+                for line in _HELP[topic].splitlines():
+                    self._print(line)
                 self._print("")
             else:
                 self._print(f"No help for '{topic}'.  Topics: {', '.join(_HELP)}")
@@ -314,16 +436,16 @@ class DXClusterTUI:
         self._print("  bands                               – show band plan")
         self._print("  stream   [start|stop]               – toggle live spot stream")
         self._print("  filter   band|mode|dx|show|clear    – manage filters")
-        self._print("  worked   <prefix...>  (alias: w)    – add to worked/exclude list")
-        self._print("  include  <prefix...>                – add to include whitelist")
-        self._print("  exclude  <prefix...>                – add to exclude blacklist")
+        self._print("  worked   <prefix…>  (alias: w)      – add to worked/exclude list")
+        self._print("  include  <prefix…>                  – add to include whitelist")
+        self._print("  exclude  <prefix…>                  – add to exclude blacklist")
         self._print("  status                              – connection & filter summary")
         self._print("  json     [on|off]                   – toggle JSON output")
         self._print("  save                                – save settings now")
         self._print("  config                              – show config file path")
         self._print("  quit                                – exit")
         self._print("")
-        self._print("Type 'help <command>' for details on any command.")
+        self._print("Type 'help <command>' for details.  Settings auto-save on every change.")
         self._print("")
 
     async def _cmd_connect(self, args: list[str]) -> None:
@@ -365,8 +487,8 @@ class DXClusterTUI:
                 "  Use:  connect <node> <your-callsign>"
             )
         self._print(
-            f"Ready: {host}:{port} as {callsign}  "
-            "(type 'stream' to start receiving spots)"
+            f"Ready: {host}:{port} as {callsign}"
+            "  (type 'stream' to start receiving spots)"
         )
 
     async def _cmd_disconnect(self, args: list[str]) -> None:
@@ -379,10 +501,10 @@ class DXClusterTUI:
         self._print("")
         self._print("Known DXCluster nodes:")
         self._print(f"  {'Name':<14}  {'Host:Port':<36}  Description")
-        self._print("  " + "-" * 90)
+        self._print("  " + "─" * 88)
         for name, (host, port) in KNOWN_CLUSTERS.items():
             active = "  ← connected" if self._cfg.connection.host == host else ""
-            desc = CLUSTER_DESCRIPTIONS.get(name, "")
+            desc   = CLUSTER_DESCRIPTIONS.get(name, "")
             self._print(f"  {name:<14}  {host + ':' + str(port):<36}  {desc}{active}")
         self._print("")
 
@@ -395,10 +517,18 @@ class DXClusterTUI:
 
     async def _cmd_filter(self, args: list[str]) -> None:
         if not args:
-            self._print("Usage: filter <band|mode|dx|spotter|comment|show|clear> [values...]")
+            self._print(
+                "Usage: filter <band|mode|dx|show|clear> [values…]\n"
+                "  filter band 20m 40m\n"
+                "  filter mode CW FT8 SSB\n"
+                "  filter dx include VK ZL\n"
+                "  filter dx exclude G ON DL\n"
+                "  filter show\n"
+                "  filter clear"
+            )
             return
 
-        sub = args[0].lower()
+        sub    = args[0].lower()
         values = args[1:]
 
         if sub == "show":
@@ -413,52 +543,42 @@ class DXClusterTUI:
             return
 
         if not values:
-            self._print(f"Usage: filter {sub} <value...>")
+            self._print(f"Usage: filter {sub} <value…>")
             return
 
         f = self._cfg.filters
 
         if sub == "band":
-            for b in values:
-                if b.lower() not in BAND_PLAN:
-                    self._print(f"Unknown band '{b}'.  Available: {', '.join(BAND_PLAN)}")
-                    return
-            f.bands = list({*f.bands, *[v.lower() for v in values]})
-            self._print(f"Band filter: {', '.join(sorted(f.bands))}")
+            invalid = [b for b in values if b.lower() not in BAND_PLAN]
+            if invalid:
+                self._print(
+                    f"Unknown band(s): {', '.join(invalid)}\n"
+                    f"Available: {', '.join(BAND_PLAN)}"
+                )
+                return
+            f.bands = sorted({*f.bands, *[v.lower() for v in values]})
+            self._print(f"Band filter: {', '.join(f.bands)}")
 
         elif sub == "mode":
-            f.modes = list({*f.modes, *[v.upper() for v in values]})
-            self._print(f"Mode filter: {', '.join(sorted(f.modes))}")
+            f.modes = sorted({*f.modes, *[v.upper() for v in values]})
+            self._print(f"Mode filter: {', '.join(f.modes)}")
 
         elif sub == "dx":
             if not values:
-                self._print("Usage: filter dx include|exclude <prefix...>")
+                self._print("Usage: filter dx include|exclude <prefix…>")
                 return
             direction = values[0].lower()
-            prefixes = values[1:]
+            prefixes  = values[1:]
             if not prefixes:
-                self._print(f"Usage: filter dx {direction} <prefix...>")
+                self._print(f"Usage: filter dx {direction} <prefix…>")
                 return
             if direction == "include":
                 await self._do_include(prefixes)
             elif direction == "exclude":
                 await self._do_exclude(prefixes)
             else:
-                self._print("Usage: filter dx include|exclude <prefix...>")
-                return
-
-        elif sub == "spotter":
-            existing = set(getattr(f, "_spotter_prefixes", []))
-            existing.update(v.upper() for v in values)
-            # Store spotter prefixes as a special attribute on the filter
-            # (not in the persisted config – use 'filter dx' for persistent)
-            self._print(
-                f"Spotter filter applied for this session: {', '.join(sorted(existing))}\n"
-                "(Note: spotter filters are not persisted – use 'filter dx' for that.)"
-            )
-
-        elif sub == "comment":
-            self._print("Comment filter applied for this session.")
+                self._print("Usage: filter dx include|exclude <prefix…>")
+            return  # include/exclude already call save and apply
 
         else:
             self._print(
@@ -471,28 +591,26 @@ class DXClusterTUI:
         save_config(self._cfg)
 
     async def _cmd_worked(self, args: list[str]) -> None:
-        """Add entities to exclude list (shorthand for 'filter dx exclude')."""
         if not args:
-            self._print("Usage: worked <prefix...>  (e.g. worked G ON DL)")
+            self._print("Usage: worked <prefix…>  e.g. worked G ON DL")
             return
         await self._do_exclude(args)
 
     async def _cmd_include(self, args: list[str]) -> None:
         if not args:
-            self._print("Usage: include <prefix...>  (e.g. include VK ZL)")
+            self._print("Usage: include <prefix…>  e.g. include VK ZL")
             return
         await self._do_include(args)
 
     async def _cmd_exclude(self, args: list[str]) -> None:
         if not args:
-            self._print("Usage: exclude <prefix...>  (e.g. exclude G ON)")
+            self._print("Usage: exclude <prefix…>  e.g. exclude G ON")
             return
         await self._do_exclude(args)
 
     async def _cmd_stream(self, args: list[str]) -> None:
         sub = args[0].lower() if args else None
-        should_stop = sub == "stop" or (sub is None and self._streaming)
-        if should_stop:
+        if sub == "stop" or (sub is None and self._streaming):
             await self._stop_stream()
             return
         if not self._cfg.connection.host:
@@ -505,8 +623,8 @@ class DXClusterTUI:
 
     async def _cmd_status(self, args: list[str]) -> None:
         self._print("")
-        self._print("Status:")
         c = self._cfg.connection
+        self._print("Status:")
         if c.host:
             self._print(f"  Node      : {c.host}:{c.port}")
             self._print(f"  Callsign  : {c.callsign}")
@@ -537,23 +655,22 @@ class DXClusterTUI:
         self._print(f"Config file: {config_file_path()}")
 
     async def _cmd_quit(self, args: list[str]) -> None:
-        raise SystemExit
+        if self._app:
+            self._app.exit()
 
     # ── Include / exclude helpers ─────────────────────────────────────────────
 
     async def _do_include(self, prefixes: list[str]) -> None:
         for pfx in prefixes:
-            entity_desc = describe_entity(pfx)
             self._cfg.add_include(pfx.upper())
-            self._print(f"Include ✓  {entity_desc}")
+            self._print(f"Include ✓  {describe_entity(pfx)}")
         self._apply_filter_to_feed()
         save_config(self._cfg)
 
     async def _do_exclude(self, prefixes: list[str]) -> None:
         for pfx in prefixes:
-            entity_desc = describe_entity(pfx)
             self._cfg.add_exclude(pfx.upper())
-            self._print(f"Worked/Exclude ✓  {entity_desc}")
+            self._print(f"Exclude ✓  {describe_entity(pfx)}")
         self._apply_filter_to_feed()
         save_config(self._cfg)
 
@@ -565,7 +682,7 @@ class DXClusterTUI:
         if not has_any:
             self._print("  Filters   : none (all spots shown)")
             return
-        self._print("  Filters   :")
+        self._print("  Filters:")
         if f.bands:
             self._print(f"    band    : {', '.join(sorted(f.bands))}")
         if f.modes:
@@ -593,8 +710,10 @@ class DXClusterTUI:
             reconnect=True,
         )
         self._streaming = True
-        self._stream_task = asyncio.create_task(self._stream_loop())
-        self._print(f"Connecting to {c.host}:{c.port}…  Type 'stream stop' to pause.")
+        if self._app:
+            self._app.invalidate()
+        self._stream_task = asyncio.ensure_future(self._stream_loop())
+        self._print(f"Connecting to {c.host}:{c.port}…  (type 'stream stop' to pause)")
 
     async def _stop_stream(self, silent: bool = False) -> None:
         if self._feed:
@@ -608,6 +727,8 @@ class DXClusterTUI:
             self._stream_task = None
         self._streaming = False
         self._feed = None
+        if self._app:
+            self._app.invalidate()
         if not silent:
             self._print(f"Stream stopped.  ({self._spot_count} spot(s) received.)")
 
@@ -615,41 +736,21 @@ class DXClusterTUI:
         try:
             async for spot in self._feed.spots():
                 self._spot_count += 1
-                formatted = _format_spot(spot, self._json_mode)
-                if HAS_PROMPT_TOOLKIT and isinstance(formatted, FormattedText):
-                    print_formatted_text(formatted)
+                if self._json_mode:
+                    self._write_line([("", spot.to_json())])
                 else:
-                    print(formatted, flush=True)
+                    self._write_line(_format_spot_parts(spot))
         except asyncio.CancelledError:
             pass
         except ConnectionError as exc:
-            self._print(f"\n  Connection failed: {exc}")
-            self._print("  Type 'nodes' to see known nodes, or 'connect' to try another.")
+            self._print(f"Connection failed: {exc}")
+            self._print("Type 'nodes' to see known nodes, or 'connect' to try another.")
         except OSError as exc:
-            self._print(f"\n  Network error: {exc}  –  type 'stream' to retry.")
+            self._print(f"Network error: {exc}  – type 'stream' to retry.")
         except Exception as exc:
             self._print(f"Stream error: {type(exc).__name__}: {exc}")
         finally:
             self._streaming = False
             self._stream_task = None
-
-    # ── Output ────────────────────────────────────────────────────────────────
-
-    def _print(self, msg: str = "") -> None:
-        if HAS_PROMPT_TOOLKIT:
-            print_formatted_text(HTML(f"{msg}"))
-        else:
-            print(msg)
-
-    def _print_banner(self) -> None:
-        self._print("")
-        self._print("╔══════════════════════════════════════════════════════════╗")
-        self._print("║          DXClusterSpots  –  Interactive Shell            ║")
-        self._print("║  Tab to complete  │  ↑/↓ history  │  Ctrl-D to quit     ║")
-        self._print("╚══════════════════════════════════════════════════════════╝")
-        self._print("Type 'help' for commands, 'nodes' to list cluster servers.")
-        self._print("")
-        if self._cfg.filters.exclude_prefixes:
-            n = len(self._cfg.filters.exclude_prefixes)
-            self._print(f"Loaded worked/exclude list: {n} entit{'ies' if n != 1 else 'y'}  "
-                        "(type 'filter show' to review)")
+            if self._app:
+                self._app.invalidate()
