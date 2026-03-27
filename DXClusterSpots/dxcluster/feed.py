@@ -28,15 +28,49 @@ from .parser import parse_spot
 
 logger = logging.getLogger(__name__)
 
-# A handful of well-known public DXCluster nodes.
-# (host, port) – extend this dict as needed.
+# Known public DXCluster telnet nodes.
+# Key   → short name used on the command line / in the shell
+# Value → (hostname, port)
 KNOWN_CLUSTERS: dict[str, tuple[str, int]] = {
-    "gb7mbc":    ("gb7mbc.gb7.me.uk",   7300),
-    "ve7cc":     ("dx.ve7cc.net",          23),
-    "k4zr":      ("k4zr.no-ip.org",      7300),
-    "w6cua":     ("w6cua.no-ip.com",     7300),
-    "ar-cluster": ("ar.k3lr.com",         7373),
-    "db0sue":    ("db0sue.de",            8000),
+    # ── Belgium ────────────────────────────────────────────────────────
+    "on0nol":    ("nolcluster.on8ar.eu",        7300),  # NOL Radioamateur Club, JO21rd
+    # ── Netherlands ────────────────────────────────────────────────────
+    "pi4cc":     ("dxc.pi4cc.nl",               8000),  # PI4CC, Centrum voor Elektronica
+    "pa6nl":     ("dxc.pa6.nl",                   23),  # PA6NL, Wassenaar JO22fd
+    # ── Germany ────────────────────────────────────────────────────────
+    "da0bcc":    ("dx.da0bcc.de",               7300),  # Bavarian Contest Club (replaced db0sue Sep 2024)
+    # ── United Kingdom ─────────────────────────────────────────────────
+    "g6nhu":     ("dxspider.co.uk",             7300),  # G6NHU-2, dedicated datacenter, ~99.998% uptime
+    "gb7djk":    ("gb7djk.dxcluster.net",       7300),  # GB7DJK, East Dereham
+    "gb7baa":    ("gb7baa.com",                 7300),  # GB7BAA, Worcester
+    "gb7bux":    ("dxc.gb7bux.co.uk",           7373),  # GB7BUX, Buxton
+    # ── France ─────────────────────────────────────────────────────────
+    "f6kdf":     ("f6kdf.ath.cx",               7300),  # F6KDF, Lyon
+    # ── Spain ──────────────────────────────────────────────────────────
+    "ea7jxh":    ("dx.ea7jxh.eu",               7300),  # EA7JXH
+    # ── North America ──────────────────────────────────────────────────
+    "ve7cc":     ("dx.ve7cc.net",                 23),  # VE7CC, Vancouver BC
+    "k4zr":      ("k4zr.no-ip.org",            7300),  # K4ZR
+    "w6cua":     ("w6cua.no-ip.com",           7300),  # W6CUA
+    "ar-cluster": ("ar.k3lr.com",              7373),  # AR-Cluster, K3LR
+}
+
+# Human-readable descriptions shown by the 'nodes' command.
+CLUSTER_DESCRIPTIONS: dict[str, str] = {
+    "on0nol":    "Belgium      – ON0NOL / NOL Radioamateur Club (JO21rd)",
+    "pi4cc":     "Netherlands  – PI4CC, Centrum voor Elektronica",
+    "pa6nl":     "Netherlands  – PA6NL, Wassenaar (JO22fd)",
+    "da0bcc":    "Germany      – DA0BCC / Bavarian Contest Club",
+    "g6nhu":     "UK           – G6NHU-2, datacenter hosted, ~99.998% uptime",
+    "gb7djk":    "UK           – GB7DJK, East Dereham",
+    "gb7baa":    "UK           – GB7BAA, Worcester",
+    "gb7bux":    "UK           – GB7BUX, Buxton",
+    "f6kdf":     "France       – F6KDF, Lyon",
+    "ea7jxh":    "Spain        – EA7JXH",
+    "ve7cc":     "Canada       – VE7CC, Vancouver BC",
+    "k4zr":      "USA          – K4ZR",
+    "w6cua":     "USA          – W6CUA",
+    "ar-cluster": "USA         – AR-Cluster / K3LR",
 }
 
 _DEFAULT_RECONNECT_DELAY = 30.0  # seconds

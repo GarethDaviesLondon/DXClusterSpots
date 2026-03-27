@@ -29,7 +29,7 @@ import logging
 import sys
 from typing import Optional
 
-from dxcluster import BAND_PLAN, KNOWN_CLUSTERS, SpotFeed, SpotFilter
+from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -8,7 +8,7 @@ Public API::
 
 from .bands import BAND_PLAN, band_to_range, frequency_to_band
 from .client import DXClusterClient
-from .feed import KNOWN_CLUSTERS, SpotFeed
+from .feed import CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed
 from .filters import SpotFilter
 from .models import DXSpot
 from .parser import parse_spot
@@ -20,6 +20,7 @@ __all__ = [
     "SpotFilter",
     "parse_spot",
     "KNOWN_CLUSTERS",
+    "CLUSTER_DESCRIPTIONS",
     "BAND_PLAN",
     "frequency_to_band",
     "band_to_range",

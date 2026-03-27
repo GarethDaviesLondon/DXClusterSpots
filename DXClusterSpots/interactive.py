@@ -15,7 +15,7 @@ import asyncio
 import sys
 from typing import Optional
 
-from dxcluster import BAND_PLAN, KNOWN_CLUSTERS, SpotFeed, SpotFilter
+from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter
 
 # ── readline (optional – gracefully absent on Windows without pyreadline) ────
 try:
@@ -297,9 +297,12 @@ class InteractiveShell:
     async def _cmd_nodes(self, args: list[str]) -> None:
         self._print("")
         self._print("Known DXCluster nodes:")
+        self._print(f"  {'Name':<14}  {'Host:Port':<36}  Description")
+        self._print("  " + "-" * 90)
         for name, (host, port) in KNOWN_CLUSTERS.items():
             active = "  ← connected" if (self._connected and self._host == host) else ""
-            self._print(f"  {name:<14}  {host}:{port}{active}")
+            desc = CLUSTER_DESCRIPTIONS.get(name, "")
+            self._print(f"  {name:<14}  {host + ':' + str(port):<36}  {desc}{active}")
         self._print("")
 
     async def _cmd_bands(self, args: list[str]) -> None:
