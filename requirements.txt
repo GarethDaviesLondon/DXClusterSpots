@@ -1,0 +1,14 @@
+# DXClusterSpots dependencies
+#
+# Core library uses only the Python standard library (asyncio, re, json,
+# dataclasses, argparse) so there is only ONE required package:
+
+prompt_toolkit>=3.0          # split-screen TUI (spots pane + command input)
+
+# Optional – uncomment to enable enhanced features:
+#
+# pyhamtools>=0.8.3          # extended DXCC entity lookup, locator utils
+# fastapi>=0.110             # REST API web service layer
+# uvicorn[standard]>=0.29    # ASGI server for FastAPI
+# websockets>=12.0           # WebSocket push endpoint
+# redis>=5.0                 # spot caching / fan-out via Redis pub-sub
