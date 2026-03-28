@@ -276,10 +276,10 @@ def _format_spot_parts(spot) -> list:
     country = entity_name(key) if key else ""
 
     return [
+        ("ansibrightyellow", f"{spot.frequency:>9.1f}  "), # frequency first, right-aligned, 1 decimal
         ("ansiwhite",        f"{spot.dx_callsign:<10} "),  # DX callsign, 10 chars
         ("ansicyan",         f"{country:<16} "),           # country name, 16 chars
         ("ansicyan",         f"{zone_tag:<4} "),           # CQ zone e.g. "Z14", 4 chars
-        ("ansibrightyellow", f"{spot.frequency:>9.1f}  "), # frequency right-aligned, 1 decimal
         ("ansigray",         f"de {spot.spotter:<12} "),   # spotter with "de " prefix
         ("ansiwhite",        f"{spot.comment:<26} "),      # comment, truncated/padded to 26
         (mode_colour,        f"{mode_tag:<5} "),           # mode e.g. "CW   ", 5 chars
@@ -310,6 +310,10 @@ class DXClusterTUI:
 
         # Each entry: list of (style, text) tuples for one output line
         self._output_lines: list[list] = []
+
+        # Scroll offset: 0 = auto-scroll to bottom; N = N lines up from the bottom.
+        # PageUp/PageDown key bindings adjust this value.
+        self._scroll_offset: int = 0
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -359,19 +363,26 @@ class DXClusterTUI:
               We add the newline separator between entries (not after the last
               one) so there is no trailing blank line at the bottom of the pane.
             """
-            # Determine how many lines the output pane can show.
             try:
                 rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
             except Exception:
-                rows = 40  # safe fallback if terminal size cannot be determined
-            visible = max(5, rows)   # always show at least 5 lines
+                rows = 40
+            visible = max(5, rows)
+            total = len(self._output_lines)
 
-            # Slice the tail of _output_lines to auto-scroll to the bottom.
-            lines = self._output_lines[-visible:]
+            if self._scroll_offset > 0:
+                # Scrolled up: show a window ending scroll_offset lines before the end.
+                end = max(0, total - self._scroll_offset)
+                start = max(0, end - visible)
+                lines = self._output_lines[start:end]
+            else:
+                # Auto-scroll: always show the most recent lines.
+                lines = self._output_lines[-visible:]
+
             result = []
             for i, parts in enumerate(lines):
                 if i > 0:
-                    result.append(("", "\n"))  # line separator (not after last)
+                    result.append(("", "\n"))
                 result.extend(parts)
             return result
 
@@ -403,9 +414,10 @@ class DXClusterTUI:
             if f.exclude_prefixes:
                 parts.append(f"excl({len(f.exclude_prefixes)})")
             filters_str = "  │  " + "  ".join(parts) if parts else ""
+            scroll_str = f"  │  ↑ scroll ({self._scroll_offset} lines)" if self._scroll_offset > 0 else ""
             return [("class:status",
                      f" {state}  │  {conn}  │  {self._spot_count} spots"
-                     f"{filters_str}  │  Ctrl-D quit ")]
+                     f"{filters_str}{scroll_str}  │  PgUp/Dn scroll  Ctrl-D quit ")]
 
         status_window = Window(
             content=FormattedTextControl(get_status_text),
@@ -442,6 +454,33 @@ class DXClusterTUI:
         @kb.add("c-c")
         def _clear(event):
             input_field.buffer.reset()
+
+        @kb.add("pageup")
+        def _scroll_up(event):
+            try:
+                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+            except Exception:
+                page = 20
+            self._scroll_offset = min(
+                self._scroll_offset + page,
+                max(0, len(self._output_lines) - 1),
+            )
+            event.app.invalidate()
+
+        @kb.add("pagedown")
+        def _scroll_down(event):
+            try:
+                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+            except Exception:
+                page = 20
+            self._scroll_offset = max(0, self._scroll_offset - page)
+            event.app.invalidate()
+
+        @kb.add("escape")
+        def _scroll_bottom(event):
+            """Jump back to the live bottom (auto-scroll mode)."""
+            self._scroll_offset = 0
+            event.app.invalidate()
 
         # ── Application ───────────────────────────────────────────────────────
         self._app = Application(
@@ -556,7 +595,7 @@ class DXClusterTUI:
         banner = [
             "╔══════════════════════════════════════════════════════════════╗",
             "║            DXClusterSpots  –  Split-Pane Shell              ║",
-            "║  Tab=complete  ↑/↓=history  Ctrl-C=clear  Ctrl-D=quit      ║",
+            "║  Tab=complete  ↑/↓=history  PgUp/Dn=scroll  Ctrl-D=quit    ║",
             "╚══════════════════════════════════════════════════════════════╝",
             "Type 'help' for commands,  'nodes' to list cluster servers.",
             "",
@@ -948,18 +987,9 @@ class DXClusterTUI:
             self._print("─" * 78)
             for s in results:
                 ts = s.received_at.strftime("%H:%M")
-                zone_tag = f"Z{s.zone}" if s.zone else "   "
-                mode_tag = f"{s.mode:<5}" if s.mode else "     "
-                self._write_line([
-                    ("ansidarkgray",    f" {ts} "),
-                    ("ansibrightyellow",f"{s.frequency:>9.1f} kHz  "),
-                    ("ansibrightgreen", f"{mode_tag} "),
-                    ("ansicyan",        f"{zone_tag} "),
-                    ("ansiwhite",       f"DX de {s.spotter:<12} "),
-                    ("ansiwhite",       f"{s.dx_callsign:<12} "),
-                    ("ansigray",        f"{s.comment:<30} "),
-                    ("ansidarkgray",    s.time_str),
-                ])
+                self._write_line(
+                    [("ansidarkgray", f"{ts} ")] + _format_spot_parts(s)
+                )
             self._print("─" * 78)
 
         elif sub == "call":
@@ -972,19 +1002,9 @@ class DXClusterTUI:
             self._print("─" * 78)
             for s in results:
                 ts = s.received_at.strftime("%H:%M")
-                band_tag = f"[{s.band}]" if s.band else "[?]  "
-                mode_tag = f"{s.mode:<5}" if s.mode else "     "
-                zone_tag = f"Z{s.zone}" if s.zone else "   "
-                self._write_line([
-                    ("ansidarkgray",    f" {ts} "),
-                    ("ansibrightgreen", f"{band_tag:<7} {mode_tag} "),
-                    ("ansicyan",        f"{zone_tag} "),
-                    ("ansibrightyellow",f"{s.frequency:>9.1f} kHz  "),
-                    ("ansiwhite",       f"DX de {s.spotter:<12} "),
-                    ("ansiwhite",       f"{s.dx_callsign:<12} "),
-                    ("ansigray",        f"{s.comment:<30} "),
-                    ("ansidarkgray",    s.time_str),
-                ])
+                self._write_line(
+                    [("ansidarkgray", f"{ts} ")] + _format_spot_parts(s)
+                )
             self._print("─" * 78)
 
         else:
