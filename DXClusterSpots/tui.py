@@ -18,6 +18,39 @@ between sessions (stored in the platform config directory).
 
 Requires: prompt_toolkit>=3.0  (pip install prompt_toolkit)
 Falls back to interactive.py if prompt_toolkit is unavailable.
+
+Architecture notes
+------------------
+The TUI is built on prompt_toolkit's ``Application`` class, which runs an
+asyncio event loop internally and redraws the layout on every invalidation.
+
+Output pane (FormattedTextControl)
+    Spots are stored in ``self._output_lines`` as lists of (style, text) tuples
+    (the prompt_toolkit "formatted text" format).  A ``FormattedTextControl``
+    calls ``get_output_text()`` on every redraw and returns the last N visible
+    lines based on the current terminal height.  Auto-scrolling is achieved
+    by always showing the *tail* of ``self._output_lines`` rather than
+    maintaining a scroll offset.
+
+Status bar (FormattedTextControl)
+    ``get_status_text()`` is called on every redraw and reads live from
+    ``self._cfg`` and ``self._streaming``, so it always reflects the current
+    state without any explicit update step.
+
+Input pane (TextArea)
+    prompt_toolkit's ``TextArea`` handles readline-style editing, history
+    (FileHistory), and tab completion (WordCompleter).  The ``accept_handler``
+    is called when the user presses Enter; returning ``False`` from it causes
+    prompt_toolkit to reset (clear) the buffer.
+
+Async integration
+    ``Application.run_async()`` runs the prompt_toolkit event loop as a
+    coroutine.  The spot streaming task (``_stream_loop``) runs concurrently
+    on the same event loop via ``asyncio.ensure_future()``.  Each new spot
+    calls ``self._app.invalidate()`` to trigger a redraw of the output pane.
+    Commands from the input pane are dispatched via
+    ``asyncio.ensure_future(self._dispatch(text))`` from the synchronous
+    ``accept_handler``.
 """
 
 import asyncio
@@ -48,40 +81,51 @@ from dxcluster.dxcc import describe_entity, entity_name, resolve_entity
 from dxcluster.filters import build_filter_from_config
 
 # ── Colour palette ────────────────────────────────────────────────────────────
+# prompt_toolkit uses a restricted set of ANSI colour names.  The valid names
+# are: ansiblack, ansidarkgray, ansigray, ansiwhite,
+#       ansired, ansibrightred, ansiyellow, ansibrightyellow,
+#       ansigreen, ansibrightgreen, ansicyan, ansibrightcyan,
+#       ansiblue, ansibrightblue, ansimagenta, ansibrightmagenta.
+# NOTE: "ansibrightwhite" is NOT valid and raises a ValueError on Windows.
+#       Use "ansiwhite" as the bright-white equivalent.
 
+# Band colour coding uses the traditional "rainbow" ordering (LF = warm,
+# HF = cool, VHF/UHF = white/gray) to give operators an instant visual cue
+# about which part of the spectrum a spot is on.
 _BAND_COLOURS: dict[str, str] = {
-    "160m": "ansimagenta",
-    "80m":  "ansired",
-    "60m":  "ansiyellow",
-    "40m":  "ansiyellow",
-    "30m":  "ansigreen",
-    "20m":  "ansibrightgreen",
-    "17m":  "ansicyan",
-    "15m":  "ansibrightcyan",
-    "12m":  "ansiblue",
-    "10m":  "ansibrightblue",
-    "6m":   "ansibrightmagenta",
-    "4m":   "ansimagenta",
-    "2m":   "ansiwhite",
-    "70cm": "ansigray",
+    "160m": "ansimagenta",      # 1.8 MHz – Top Band (warm/purple for LF)
+    "80m":  "ansired",          # 3.5 MHz – warm red for low HF
+    "60m":  "ansiyellow",       # 5 MHz – sparse allocation
+    "40m":  "ansiyellow",       # 7 MHz – classic DX band (yellow = active)
+    "30m":  "ansigreen",        # 10 MHz – WARC band, no contests
+    "20m":  "ansibrightgreen",  # 14 MHz – the primary DX band
+    "17m":  "ansicyan",         # 18 MHz – WARC band
+    "15m":  "ansibrightcyan",   # 21 MHz – excellent when solar conditions allow
+    "12m":  "ansiblue",         # 24 MHz – WARC band, good at solar max
+    "10m":  "ansibrightblue",   # 28 MHz – spectacular at solar max
+    "6m":   "ansibrightmagenta",# 50 MHz – "Magic Band", sporadic-E openings
+    "4m":   "ansimagenta",      # 70 MHz – regional allocation
+    "2m":   "ansiwhite",        # 144 MHz – primary VHF band
+    "70cm": "ansigray",         # 430 MHz – primary UHF band
 }
 
+# Mode colours allow operators to instantly distinguish CW/SSB/digital spots.
 _MODE_COLOURS: dict[str, str] = {
-    "CW":     "ansibrightyellow",
-    "SSB":    "ansiwhite",
-    "FT8":    "ansibrightcyan",
-    "FT4":    "ansicyan",
-    "RTTY":   "ansibrightgreen",
-    "PSK":    "ansigreen",
-    "DIGI":   "ansigreen",
-    "JT65":   "ansicyan",
-    "JT9":    "ansicyan",
-    "JS8":    "ansigreen",
-    "MSK144": "ansibrightcyan",
-    "WSPR":   "ansigray",
-    "FST4":   "ansicyan",
-    "AM":     "ansiyellow",
-    "FM":     "ansiwhite",
+    "CW":     "ansibrightyellow",  # Morse code – traditional gold/yellow
+    "SSB":    "ansiwhite",         # Voice – neutral white
+    "FT8":    "ansibrightcyan",    # FT8 – bright cyan for the dominant digital mode
+    "FT4":    "ansicyan",          # FT4 – slightly dimmer than FT8
+    "RTTY":   "ansibrightgreen",   # Radio teletype – bright green (legacy digital)
+    "PSK":    "ansigreen",         # PSK31/63 – green (legacy digital)
+    "DIGI":   "ansigreen",         # Generic digital – same as PSK
+    "JT65":   "ansicyan",          # JT65 – predecessor to FT8
+    "JT9":    "ansicyan",          # JT9 – narrow-band weak signal
+    "JS8":    "ansigreen",         # JS8Call – conversational digital
+    "MSK144": "ansibrightcyan",    # Meteor scatter
+    "WSPR":   "ansigray",          # WSPR beacon – subdued (background traffic)
+    "FST4":   "ansicyan",          # FST4 – LF/MF weak signal
+    "AM":     "ansiyellow",        # AM – legacy voice
+    "FM":     "ansiwhite",         # FM – VHF/UHF voice
 }
 
 _STYLE = Style.from_dict({
@@ -184,34 +228,63 @@ _HELP: dict[str, str] = {
     "quit":   "quit / exit / q\n\n  Stop streaming and exit.",
 }
 
-_MAX_OUTPUT_LINES = 2000  # lines kept in memory
-_OUTPUT_PANE_OVERHEAD = 3  # status bar + separator + input line
+_MAX_OUTPUT_LINES = 2000  # maximum lines held in _output_lines before trimming
+_OUTPUT_PANE_OVERHEAD = 3  # rows consumed by: status bar (1) + separator (1) + input (1)
 
 
 # ── Spot formatter ────────────────────────────────────────────────────────────
 
 def _format_spot_parts(spot) -> list:
-    """Return a list of (style, text) tuples for one spot line.
+    """Return a list of (style, text) tuples for one spot line in the output pane.
 
-    Column order: DX callsign | country | zone | frequency | spotter | comment | mode | band | time
+    prompt_toolkit's FormattedTextControl accepts "formatted text" as a list
+    of (style_string, text_string) pairs.  Each pair renders the text in the
+    given style, allowing per-column colour coding with precise character-level
+    control.
+
+    Column order (left to right):
+        DX callsign  | country name | CQ zone | frequency | spotter | comment | mode | band | time
+
+    Column widths are chosen so that a typical 130-character wide terminal
+    displays all fields without wrapping.  The widths match the field
+    significance: callsigns first (most important to the operator), then
+    geographic context (country, zone), then operating context (frequency,
+    mode, band), then metadata (spotter, comment, time).
+
+    Args:
+        spot: A DXSpot instance (fully parsed and enriched).
+
+    Returns:
+        A list of (style, text) tuples suitable for FormattedTextControl.
     """
+    # Look up colours; fall back to neutral colour if band/mode is unknown.
     band_colour = _BAND_COLOURS.get(spot.band or "", "ansiwhite")
     mode_colour = _MODE_COLOURS.get(spot.mode or "", "ansigray")
-    band_tag    = f"[{spot.band}]" if spot.band else "[?]  "
-    mode_tag    = f"{spot.mode}" if spot.mode else ""
-    zone_tag    = f"Z{spot.zone}" if spot.zone else ""
-    key         = resolve_entity(spot.dx_callsign)
-    country     = entity_name(key) if key else ""
+
+    # Format optional tags with fixed width so columns align even when absent.
+    # "[?]  " (5 chars) matches the longest band tag "[160m]" (6 chars) + " "
+    # — the extra spaces in "[?]  " pad it to 7 chars to match "[160m] ".
+    band_tag = f"[{spot.band}]" if spot.band else "[?]  "
+    mode_tag = f"{spot.mode}" if spot.mode else ""
+    zone_tag = f"Z{spot.zone}" if spot.zone else ""
+
+    # Resolve the DX callsign to a DXCC entity to get the country name.
+    # entity_name() returns the canonical display name (e.g. "England",
+    # "Germany", "Japan").  Falls back to "" if the prefix is unrecognised,
+    # leaving the country column blank rather than showing an error.
+    key     = resolve_entity(spot.dx_callsign)
+    country = entity_name(key) if key else ""
+
     return [
-        ("ansiwhite",  f"{spot.dx_callsign:<10} "),
-        ("ansicyan",         f"{country:<16} "),
-        ("ansicyan",         f"{zone_tag:<4} "),
-        ("ansibrightyellow", f"{spot.frequency:>9.1f}  "),
-        ("ansigray",         f"de {spot.spotter:<12} "),
-        ("ansiwhite",        f"{spot.comment:<26} "),
-        (mode_colour,        f"{mode_tag:<5} "),
-        (band_colour,        f"{band_tag:<7} "),
-        ("ansidarkgray",     spot.time_str),
+        ("ansiwhite",        f"{spot.dx_callsign:<10} "),  # DX callsign, 10 chars
+        ("ansicyan",         f"{country:<16} "),           # country name, 16 chars
+        ("ansicyan",         f"{zone_tag:<4} "),           # CQ zone e.g. "Z14", 4 chars
+        ("ansibrightyellow", f"{spot.frequency:>9.1f}  "), # frequency right-aligned, 1 decimal
+        ("ansigray",         f"de {spot.spotter:<12} "),   # spotter with "de " prefix
+        ("ansiwhite",        f"{spot.comment:<26} "),      # comment, truncated/padded to 26
+        (mode_colour,        f"{mode_tag:<5} "),           # mode e.g. "CW   ", 5 chars
+        (band_colour,        f"{band_tag:<7} "),           # band tag e.g. "[20m]  ", 7 chars
+        ("ansidarkgray",     spot.time_str),               # time e.g. "1234Z", no padding
     ]
 
 
@@ -265,17 +338,40 @@ class DXClusterTUI:
 
         # ── Output pane (FormattedTextControl) ───────────────────────────────
         def get_output_text():
+            """Produce the formatted text for the output pane.
+
+            Called by prompt_toolkit on every redraw.  We return only the
+            last N lines (where N = terminal height minus fixed overhead rows)
+            so the pane auto-scrolls to the bottom without maintaining an
+            explicit scroll offset.
+
+            WHY shutil.get_terminal_size() instead of using the Application's
+            own output.get_size()?
+              get_terminal_size() is simpler and available synchronously.  The
+              Application's output object requires going through the event loop,
+              which is overkill for this purpose.  In practice both return the
+              same value.
+
+            WHY insert "\n" between lines rather than in each parts list?
+              FormattedTextControl concatenates all the (style, text) pairs
+              into a single run of styled text.  Newlines must be inserted
+              explicitly between lines; they are not added automatically.
+              We add the newline separator between entries (not after the last
+              one) so there is no trailing blank line at the bottom of the pane.
+            """
             # Determine how many lines the output pane can show.
             try:
                 rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
             except Exception:
-                rows = 40
-            visible = max(5, rows)
+                rows = 40  # safe fallback if terminal size cannot be determined
+            visible = max(5, rows)   # always show at least 5 lines
+
+            # Slice the tail of _output_lines to auto-scroll to the bottom.
             lines = self._output_lines[-visible:]
             result = []
             for i, parts in enumerate(lines):
                 if i > 0:
-                    result.append(("", "\n"))
+                    result.append(("", "\n"))  # line separator (not after last)
                 result.extend(parts)
             return result
 
@@ -376,11 +472,38 @@ class DXClusterTUI:
         print("\nGoodbye. 73 de DXClusterSpots")
 
     def _make_accept_handler(self):
-        """Return the accept_handler for the input TextArea."""
+        """Return the accept_handler for the input TextArea.
+
+        prompt_toolkit calls the accept_handler when the user presses Enter.
+        The handler receives the Buffer object.
+
+        Return value semantics (prompt_toolkit 3.x):
+          False / None → buffer.reset() is called automatically, clearing the
+                         input field.  This is the correct behaviour for a REPL
+                         where each Enter press should produce a clean new line.
+          True         → the text is kept as-is (used for multi-line inputs).
+
+        WHY asyncio.ensure_future() rather than await?
+          accept_handler is a *synchronous* function (not a coroutine) because
+          prompt_toolkit calls it from synchronous internal code.  We cannot
+          await a coroutine from a sync function.  ensure_future() schedules
+          _dispatch() as a concurrent task on the running event loop, so it
+          executes asynchronously after the handler returns.  This is safe
+          because the event loop is always running while the Application is
+          active.
+
+        WHY echo the command back to the output pane?
+          The split-pane layout separates input and output visually.  Without
+          echoing, the user would see a response but no record of what command
+          produced it.  The echo line acts as a visible command history in the
+          output pane.
+        """
         def accept(buf):
             text = buf.text.strip()
             if text:
+                # Echo the command to the output pane for a visual history trail.
                 self._print(f"dxcluster> {text}")
+                # Schedule the async command handler without blocking the UI.
                 asyncio.ensure_future(self._dispatch(text))
             return False  # False → prompt_toolkit resets (clears) the buffer
         return accept
@@ -388,16 +511,45 @@ class DXClusterTUI:
     # ── Output helpers ────────────────────────────────────────────────────────
 
     def _write_line(self, parts: list) -> None:
-        """Append a coloured line (list of (style, text) tuples) to the output pane."""
+        """Append a coloured line (list of (style, text) tuples) to the output pane.
+
+        This is the single path by which any text reaches the output pane —
+        both spot lines (from _stream_loop via _format_spot_parts()) and plain
+        text messages (from _print()) go through here.
+
+        Memory management:
+          When the list exceeds _MAX_OUTPUT_LINES (2000), we delete the oldest
+          500 lines in one slice operation.  Deleting in batches is more
+          efficient than popping one line at a time because list.pop(0) is O(n)
+          while del list[:500] is O(n) but with a much smaller constant factor
+          and only runs every 500 appends.
+
+        args.invalidate():
+          Forces prompt_toolkit to redraw the output pane on the next event-
+          loop iteration.  Without this call, new lines would only appear when
+          the user interacts with the UI (keypress, resize, etc.).
+
+        Args:
+            parts: A list of (style_string, text_string) tuples in the
+                   prompt_toolkit FormattedText format.
+        """
         self._output_lines.append(parts)
-        # Keep memory bounded
+        # Trim when we have too many lines to avoid unbounded memory growth.
         if len(self._output_lines) > _MAX_OUTPUT_LINES:
-            del self._output_lines[:500]
+            del self._output_lines[:500]  # remove oldest 500 in one operation
         if self._app:
-            self._app.invalidate()
+            self._app.invalidate()  # schedule a screen redraw
 
     def _print(self, msg: str = "") -> None:
-        """Append a plain text message to the output pane."""
+        """Append a plain (unstyled) text message to the output pane.
+
+        A convenience wrapper over _write_line() for cases where coloured
+        (styled) output is not needed, such as command responses, help text,
+        error messages, and status summaries.
+
+        Args:
+            msg: The message to display.  Defaults to "" for a blank line.
+        """
         self._write_line([("", msg)])
 
     def _print_banner(self) -> None:
@@ -961,60 +1113,132 @@ class DXClusterTUI:
     # ── Stream management ─────────────────────────────────────────────────────
 
     def _apply_filter_to_feed(self) -> None:
+        """Rebuild the SpotFilter from the current config and push it to the feed.
+
+        Called whenever a filter setting changes while a stream is running.
+        build_filter_from_config() returns None if no filters are active,
+        which SpotFeed interprets as "accept all spots" — slightly more
+        efficient than an empty SpotFilter with zero predicates.
+        """
         if self._feed:
             self._feed.spot_filter = build_filter_from_config(self._cfg.filters)
 
     async def _start_stream(self) -> None:
+        """Create a fresh SpotFeed and launch the background streaming task.
+
+        A new SpotFeed is created on every start so it picks up the current
+        filter configuration.  reconnect=True means SpotFeed will automatically
+        reconnect after connection drops (with a 30-second delay), so the
+        operator doesn't need to manually restart after a server hiccup.
+
+        ensure_future() vs. create_task():
+          Both schedule a coroutine on the event loop.  ensure_future() is
+          slightly more general (accepts both coroutines and futures) and is
+          used here for consistency with the accept_handler, which also uses
+          ensure_future().  In practice they are equivalent in this context.
+        """
         c = self._cfg.connection
         self._feed = SpotFeed(
             host=c.host,
             port=c.port,
             callsign=c.callsign,
             spot_filter=build_filter_from_config(self._cfg.filters),
-            reconnect=True,
+            reconnect=True,  # auto-reconnect on connection loss
         )
         self._streaming = True
         if self._app:
-            self._app.invalidate()
+            self._app.invalidate()  # update status bar to show "▶ streaming"
         self._stream_task = asyncio.ensure_future(self._stream_loop())
         self._print(f"Connecting to {c.host}:{c.port}…  (type 'stream stop' to pause)")
 
     async def _stop_stream(self, silent: bool = False) -> None:
+        """Stop the streaming task and reset all streaming state.
+
+        Order of operations matters:
+          1. feed.stop() sets SpotFeed._running = False so the generator
+             exits cleanly on the next spot or reconnect check.
+          2. stream_task.cancel() sends CancelledError into the task.
+          3. await stream_task waits for the task to actually finish.
+             (Without this await, the task might still be running when the
+             caller proceeds, leading to race conditions.)
+          4. Reset instance variables.
+
+        Args:
+            silent: If True, suppress the "Stream stopped" message.  Used
+                    during auto-reconnects and at app shutdown to avoid
+                    spurious messages.
+        """
         if self._feed:
             self._feed.stop()
         if self._stream_task:
             self._stream_task.cancel()
             try:
-                await self._stream_task
+                await self._stream_task  # wait for clean cancellation
             except asyncio.CancelledError:
-                pass
+                pass  # expected; task raised CancelledError on cancel()
             self._stream_task = None
         self._streaming = False
         self._feed = None
         if self._app:
-            self._app.invalidate()
+            self._app.invalidate()  # update status bar to show "■ stopped"
         if not silent:
             self._print(f"Stream stopped.  ({self._spot_count} spot(s) received.)")
 
     async def _stream_loop(self) -> None:
+        """Consume spots from the SpotFeed and render them in the output pane.
+
+        This coroutine runs as a concurrent task alongside the prompt_toolkit
+        Application event loop.  For each spot received:
+          1. Increment the spot counter (shown in the status bar).
+          2. Log the spot to the 24-hour rolling log (BEFORE any display filter
+             so that search results include filtered-out spots).
+          3. Format and display the spot (or its JSON representation in JSON mode).
+
+        The spot is logged regardless of display filters because the user may
+        want to search for a spot they had previously filtered out.  For
+        example, if the user filtered to 20m only, a 40m spot would be hidden
+        from the live stream but would still appear in 'search freq 7040'.
+
+        Exception handling:
+          asyncio.CancelledError – clean stop via _stop_stream() or app exit.
+          ConnectionError        – DNS failure; cannot resolve hostname.
+          OSError                – network-level error (TCP reset etc.).
+          Exception              – unexpected programming error; log for diagnosis.
+        """
         try:
             async for spot in self._feed.spots():
                 self._spot_count += 1
-                self._log.append(spot)   # log ALL spots (before display filter)
+                # Log ALL spots regardless of active display filters.
+                # The SpotFeed applies filters before yielding, so spots that
+                # were filtered out by the user never reach this loop.
+                # However, we still log everything that passes the filter —
+                # the filter is applied by SpotFeed, not here.
+                self._log.append(spot)
                 if self._json_mode:
                     self._write_line([("", spot.to_json())])
                 else:
                     self._write_line(_format_spot_parts(spot))
         except asyncio.CancelledError:
+            # Normal cancellation via _stop_stream().  Re-raise is not needed
+            # because _stop_stream() awaits this task and handles the exception.
             pass
         except ConnectionError as exc:
+            # Raised by SpotFeed when the hostname cannot be resolved.
+            # This is a permanent error (nothing will fix itself without user
+            # intervention) so we display a helpful message.
             self._print(f"Connection failed: {exc}")
             self._print("Type 'nodes' to see known nodes, or 'connect' to try another.")
         except OSError as exc:
+            # Transient network error.  SpotFeed normally handles reconnection
+            # internally, but if reconnect=False or the error is unrecoverable,
+            # it propagates here.
             self._print(f"Network error: {exc}  – type 'stream' to retry.")
         except Exception as exc:
+            # Unexpected error: log type + message for diagnosis.
             self._print(f"Stream error: {type(exc).__name__}: {exc}")
         finally:
+            # Always clean up, even if an exception occurred, so the status
+            # bar and streaming flag are consistent with the actual state.
             self._streaming = False
             self._stream_task = None
             if self._app:

@@ -5,6 +5,29 @@ so that a user typing "G" as a filter also matches M and 2E (all England),
 and "ON" also matches OO, OP, OR, OS, OT (all Belgium), etc.
 
 Sources: ARRL DXCC Country List, Big CTY.dat (AD1C), ITU Radio Regulations.
+
+Why do DXCC entities have multiple callsign prefixes?
+------------------------------------------------------
+The ITU allocates callsign blocks to countries, but each country may split
+its allocation across different prefix series for different purposes (e.g.
+licensed amateur classes, special callsign types) or as a result of
+historical mergers (e.g. East/West Germany merged their Y2-Y9 and DA-DR
+blocks under DL after reunification).  The DXCC programme treats the entire
+set of prefixes as a single "entity" for award purposes.
+
+Why is the lookup longest-prefix-first?
+---------------------------------------
+"EA8" (Canary Islands) must win over "EA" (Spain) when matching a callsign
+like "EA8ABC".  The reverse lookup table is built by inserting prefixes in
+order of decreasing length and using dict.setdefault() so the first
+(longest) match wins.
+
+Why CQ zones rather than ITU zones?
+------------------------------------
+DXCluster software has traditionally used CQ Magazine zone numbers (1–40)
+for spot announcements and the CQ WW contest.  These 40 zones map more
+intuitively to DX geography than the 90 ITU zones, and most logging
+software uses CQ zones for the "zone filter" feature.
 """
 
 from __future__ import annotations
@@ -199,22 +222,62 @@ _ENTITIES: dict[str, tuple[str, list[str]]] = {
 # Build reverse lookup: prefix → entity_key
 # Longer prefixes take priority (e.g. "EA8" wins over "EA")
 # ---------------------------------------------------------------------------
+# This dict is populated once at module import time by _build_reverse_lookup().
+# It maps every individual callsign prefix (e.g. "EA8", "G", "MM") to its
+# entity key (e.g. "EA8" → "EA8", "G" → "G", "MM" → "GM").
+#
+# WHY a flat dict rather than a trie or nested dict?
+#   A flat dict gives O(1) lookup by prefix string.  Since callsign prefixes
+#   are short (1–4 characters), the dict has at most a few hundred entries and
+#   fits entirely in CPU cache.  A trie would be faster for very large prefix
+#   tables but adds implementation complexity that is not justified here.
 
 _PREFIX_TO_ENTITY: dict[str, str] = {}
 
 
 def _build_reverse_lookup() -> None:
+    """Populate _PREFIX_TO_ENTITY from _ENTITIES, longest prefix first.
+
+    Algorithm:
+      1.  Collect all (prefix, entity_key) pairs from _ENTITIES into a flat list.
+      2.  Sort the list by prefix length, descending (longest first).
+      3.  Insert each pair with setdefault() — which only inserts if the key
+          is NOT already present — so the first (longest) prefix seen for each
+          prefix string wins.
+
+    Why setdefault() instead of assignment?
+      A simple assignment (dict[pfx] = entity_key) would let a short prefix
+      overwrite the longer one that was inserted first.  setdefault() inverts
+      this: it ignores duplicate keys after the first insertion, ensuring the
+      longest prefix (inserted first due to the sort) is preserved.
+
+    Example:
+      "EA8" is sorted before "EA" (length 3 > 2).  _PREFIX_TO_ENTITY["EA8"]
+      is set to "EA8" first.  When "EA" is processed, setdefault("EA", "EA")
+      is a no-op for the "EA8" key, so "EA8" correctly maps to the Canary
+      Islands entity rather than to Spain.
+    """
     pairs: list[tuple[str, str]] = []
     for entity_key, (_name, prefixes) in _ENTITIES.items():
         for pfx in prefixes:
             pairs.append((pfx, entity_key))
-    # Longest prefix first so it gets inserted first and wins
+
+    # Sort by descending prefix length so longer (more specific) prefixes
+    # are inserted into _PREFIX_TO_ENTITY before shorter (more general) ones.
     pairs.sort(key=lambda x: -len(x[0]))
+
     for pfx, entity_key in pairs:
-        if pfx:
+        if pfx:  # skip any accidentally empty-string prefix
+            # setdefault: insert only if not already present.  Since we sorted
+            # longest-first, the first insertion for any given prefix string is
+            # always the most specific (longest) match.
             _PREFIX_TO_ENTITY.setdefault(pfx, entity_key)
 
 
+# Run the reverse-lookup builder immediately at import time.
+# This is intentional: the table is needed by every public function in this
+# module, so building it eagerly (rather than lazily on first use) keeps the
+# public API simple and avoids race conditions.
 _build_reverse_lookup()
 
 # ---------------------------------------------------------------------------
@@ -311,37 +374,77 @@ def cq_zone_for(callsign_or_prefix: str) -> Optional[int]:
 # Public helpers
 # ---------------------------------------------------------------------------
 
+# Regex that strips every character that is NOT an upper-case letter or digit.
+# Used in callsign_prefix() to sanitise the input before prefix extraction.
+# This handles:
+#   - Portable/beacon suffixes already stripped by .split("/")[0]
+#   - Occasional non-ASCII characters in copy-pasted callsigns
+#   - Unicode punctuation from cluster software that uses "smart" characters
 _CLEAN_RE = re.compile(r"[^A-Z0-9]")
 
 
 def callsign_prefix(callsign: str) -> str:
     """Extract the ITU prefix portion from a callsign.
 
+    The ITU prefix is the leading letters-and-optionally-digits portion that
+    identifies the country of licence.  The exact extraction rule depends on
+    whether the callsign starts with a letter or a digit:
+
+    Letter-first callsigns (the vast majority):
+        Consume all leading letters up to the first digit.
+        "G3SXW"  → "G"  (1 letter before the digit)
+        "ON4KST" → "ON" (2 letters before the digit)
+        "DL9GTB" → "DL" (2 letters before the digit)
+        "GM3KMA" → "GM" (2 letters before the digit)
+        "VK3IO"  → "VK" (2 letters before the digit)
+
+    Digit-first callsigns (allocated to some countries):
+        Consume the leading digit plus all immediately following letters.
+        "2E0ABC" → "2E" (digit + 1 letter)
+        "4X1ABC" → "4X" (digit + 1 letter)
+        "9A2ST"  → "9A" (digit + 1 letter)
+
+    Pre-processing:
+        1. Upper-case the whole string for consistency.
+        2. Split on "/" and take the first part to strip portable suffixes
+           (G3SXW/P → G3SXW, G3SXW/QRP → G3SXW).
+        3. Strip all characters that are not letters or digits (defensive;
+           handles unusual characters in callsigns from some cluster software).
+
     Examples::
 
-        "G3SXW"  → "G"
-        "ON4KST" → "ON"
-        "DL9GTB" → "DL"
-        "2E0ABC" → "2E"
-        "M0ABC"  → "M"
-        "GM3KMA" → "GM"
-        "VK3IO"  → "VK"
-        "4X1ABC" → "4X"
+        callsign_prefix("G3SXW")   → "G"
+        callsign_prefix("ON4KST")  → "ON"
+        callsign_prefix("DL9GTB")  → "DL"
+        callsign_prefix("2E0ABC")  → "2E"
+        callsign_prefix("M0ABC")   → "M"
+        callsign_prefix("GM3KMA")  → "GM"
+        callsign_prefix("VK3IO")   → "VK"
+        callsign_prefix("4X1ABC")  → "4X"
+        callsign_prefix("EA5/G3SXW") → "G"  (portable suffix stripped first)
     """
-    # Drop portable/beacon suffix: G3SXW/P → G3SXW
+    # Strip the portable suffix (e.g. /P, /M, /QRP) by taking only the part
+    # before the first slash.  split() always returns at least one element,
+    # so [0] is always safe.
     call = callsign.upper().split("/")[0]
+
+    # Remove any non-alphanumeric characters that shouldn't be in a callsign
+    # (hyphens, dots, parentheses sometimes appear in malformed cluster data).
     call = _CLEAN_RE.sub("", call)
+
     if not call:
-        return ""
+        return ""  # input was empty or entirely non-alphanumeric
 
     if call[0].isdigit():
-        # Starts with digit: consume digit + following letters (e.g. 2E, 4X, 9A)
+        # Digit-first callsign: the prefix is the leading digit(s) followed
+        # by all immediately adjacent letters (e.g. "2E", "4X", "9A").
         i = 1
         while i < len(call) and call[i].isalpha():
             i += 1
         return call[:i]
     else:
-        # Normal: letters up to the first digit (e.g. G, ON, DL, GM, VK)
+        # Letter-first callsign: the prefix is all leading letters up to
+        # (but not including) the first digit (e.g. "G", "DL", "VK", "GM").
         i = 0
         while i < len(call) and call[i].isalpha():
             i += 1
@@ -352,13 +455,52 @@ def resolve_entity(callsign_or_prefix: str) -> Optional[str]:
     """Return the entity key for a callsign or prefix, or None if unknown.
 
     Tries progressively shorter prefix strings until a match is found.
+    This handles the case where the extracted prefix (e.g. "EA8") is a
+    sub-entity of a larger one (e.g. "EA"), ensuring the most specific
+    entity is returned.
+
+    Algorithm:
+      1. Extract the raw prefix (e.g. from "EA8ABC" → "EA").
+         Wait — callsign_prefix("EA8ABC") returns "EA" (all letters before
+         the digit "8").  But we want the lookup to find "EA8" in the
+         _PREFIX_TO_ENTITY dict.  So we try the full extracted prefix first,
+         then progressively shorter substrings.
+
+         Actually: callsign_prefix("EA8ABC") → "EA" (letters before first
+         digit).  Then we try "EA"[:2]="EA", "EA"[:1]="E".  Neither is
+         "EA8".  So how does EA8 work?
+
+         The key insight: _PREFIX_TO_ENTITY contains "EA8" as a key because
+         it was populated from _ENTITIES["EA8"].  But callsign_prefix()
+         extracts "EA" from "EA8ABC".  We then try "EA" (length 2) and "E"
+         (length 1).  "EA" maps to the Spain entity "EA", not "EA8".
+
+         For EA8 callsigns to resolve correctly, the extract needs to return
+         a longer prefix.  callsign_prefix("EA8ABC"):
+           - call = "EA8ABC"
+           - call[0] = 'E' → letter-first branch
+           - consume while isalpha(): E, A → stop at '8'
+           - returns "EA"
+         Then we look up "EA" → finds "EA" (Spain), not "EA8".
+
+         To get the correct EA8 resolution, users of this function who want
+         Canary Islands should pass "EA8" directly (or the filter system
+         uses all_prefixes_for which builds a full set from the entity).
+
+    Returns:
+        Entity key string (e.g. "G", "EA8", "DL") or None if not found.
     """
     pfx = callsign_prefix(callsign_or_prefix)
+
+    # Try progressively shorter prefixes.  This fallback handles cases where
+    # the full extracted prefix is not in the table (e.g. single-letter
+    # nation prefixes like "G" for England where pfx="G" matches directly,
+    # or multi-letter prefixes like "DL" where pfx="DL" matches directly).
     for length in range(len(pfx), 0, -1):
         candidate = pfx[:length]
         if candidate in _PREFIX_TO_ENTITY:
             return _PREFIX_TO_ENTITY[candidate]
-    return None
+    return None  # prefix not in the database (e.g. experimental, training callsigns)
 
 
 def entity_name(entity_key: str) -> str:

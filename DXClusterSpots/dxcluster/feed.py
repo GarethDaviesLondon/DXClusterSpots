@@ -14,6 +14,29 @@ SpotFeed deliberately uses an *async generator* pattern so it can be:
 The callback list (``add_callback``) supports the *observer* pattern for
 web service scenarios where multiple consumers need the same feed without
 each opening a separate telnet connection.
+
+Reconnection strategy
+---------------------
+SpotFeed wraps the DXClusterClient in a loop that reconnects automatically
+when the connection is lost, subject to a configurable delay.  This is
+important for long-running sessions: DXCluster nodes frequently close idle
+connections, perform server restarts, or temporarily go offline.
+
+The reconnect delay (default 30 s) is a balance between responsiveness
+(shorter delay = faster recovery) and server politeness (longer delay = less
+hammering on a server that may be overloaded or restarting).
+
+Error handling philosophy
+-------------------------
+  socket.gaierror  → re-raised immediately as ConnectionError.
+    DNS failures require user action (fix the hostname), so retrying is
+    pointless and only delays the error message.
+  ConnectionError / OSError / TimeoutError → reconnect after delay.
+    These are transient network errors that often resolve themselves.
+  asyncio.CancelledError → re-raised immediately.
+    Cancellation is an intentional control flow signal, not an error.
+  Exception (catch-all) → log and reconnect.
+    Unknown errors are treated as transient; logging provides a trail.
 """
 
 import asyncio
