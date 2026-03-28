@@ -259,7 +259,11 @@ _HELP: dict[str, str] = {
 }
 
 _MAX_OUTPUT_LINES = 2000  # maximum lines held in _output_lines before trimming
-_OUTPUT_PANE_OVERHEAD = 3  # rows consumed by: status bar (1) + separator (1) + input (1)
+# Rows consumed by the fixed UI elements below the output pane:
+#   status bar (1) + separator (1) + input field (1) + 1 safety margin.
+# The +1 margin prevents the last spot line being clipped by the layout
+# engine when its row-count view differs slightly from the OS terminal size.
+_OUTPUT_PANE_OVERHEAD = 4
 
 
 # ── Spot formatter ────────────────────────────────────────────────────────────
@@ -394,9 +398,12 @@ class DXClusterTUI:
               one) so there is no trailing blank line at the bottom of the pane.
             """
             try:
-                rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
+                # Use the Application's own output object so the row count
+                # matches what the prompt_toolkit layout engine uses — avoids
+                # a 1-2 line discrepancy that can occur with shutil.get_terminal_size().
+                rows = self._app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD
             except Exception:
-                rows = 40
+                rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
             visible = max(5, rows)
             total = len(self._output_lines)
 
@@ -488,7 +495,7 @@ class DXClusterTUI:
         @kb.add("pageup")
         def _scroll_up(event):
             try:
-                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+                page = max(5, event.app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD)
             except Exception:
                 page = 20
             self._scroll_offset = min(
@@ -500,7 +507,7 @@ class DXClusterTUI:
         @kb.add("pagedown")
         def _scroll_down(event):
             try:
-                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+                page = max(5, event.app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD)
             except Exception:
                 page = 20
             self._scroll_offset = max(0, self._scroll_offset - page)
