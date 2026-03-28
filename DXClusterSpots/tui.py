@@ -44,7 +44,7 @@ from dxcluster.config import (
     AppConfig, FilterConfig, load_config, save_config,
     config_path as config_file_path, history_path, log_path,
 )
-from dxcluster.dxcc import describe_entity
+from dxcluster.dxcc import describe_entity, entity_name, resolve_entity
 from dxcluster.filters import build_filter_from_config
 
 # ── Colour palette ────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ _STYLE = Style.from_dict({
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
     "filter", "stream", "status", "json", "worked", "w",
-    "include", "exclude", "search", "log", "save", "config", "quit", "exit", "q",
+    "include", "exclude", "search", "log", "lookup", "save", "config", "quit", "exit", "q",
 ]
 
 _HELP: dict[str, str] = {
@@ -191,20 +191,26 @@ _OUTPUT_PANE_OVERHEAD = 3  # status bar + separator + input line
 # ── Spot formatter ────────────────────────────────────────────────────────────
 
 def _format_spot_parts(spot) -> list:
-    """Return a list of (style, text) tuples for one spot line."""
+    """Return a list of (style, text) tuples for one spot line.
+
+    Column order: DX callsign | country | zone | frequency | spotter | comment | mode | band | time
+    """
     band_colour = _BAND_COLOURS.get(spot.band or "", "ansiwhite")
     mode_colour = _MODE_COLOURS.get(spot.mode or "", "ansigray")
     band_tag    = f"[{spot.band}]" if spot.band else "[?]  "
     mode_tag    = f"{spot.mode}" if spot.mode else ""
-    zone_tag    = f"Z{spot.zone}" if spot.zone else "   "
+    zone_tag    = f"Z{spot.zone}" if spot.zone else ""
+    key         = resolve_entity(spot.dx_callsign)
+    country     = entity_name(key) if key else ""
     return [
-        (band_colour,        f"{band_tag:<7}"),
-        (mode_colour,        f"{mode_tag:<5} "),
+        ("ansibrightwhite",  f"{spot.dx_callsign:<10} "),
+        ("ansicyan",         f"{country:<16} "),
         ("ansicyan",         f"{zone_tag:<4} "),
-        ("ansiwhite",        f"DX de {spot.spotter:<12} "),
-        ("ansibrightyellow", f"{spot.frequency:>9.1f} kHz  "),
-        ("ansiwhite",        f"{spot.dx_callsign:<12} "),
-        ("ansigray",         f"{spot.comment:<30} "),
+        ("ansibrightyellow", f"{spot.frequency:>9.1f}  "),
+        ("ansigray",         f"de {spot.spotter:<12} "),
+        ("ansiwhite",        f"{spot.comment:<26} "),
+        (mode_colour,        f"{mode_tag:<5} "),
+        (band_colour,        f"{band_tag:<7} "),
         ("ansidarkgray",     spot.time_str),
     ]
 
@@ -376,7 +382,7 @@ class DXClusterTUI:
             if text:
                 self._print(f"dxcluster> {text}")
                 asyncio.ensure_future(self._dispatch(text))
-            return True  # clear the input buffer
+            return False  # False → prompt_toolkit resets (clears) the buffer
         return accept
 
     # ── Output helpers ────────────────────────────────────────────────────────
@@ -448,6 +454,7 @@ class DXClusterTUI:
             "exclude":    self._cmd_exclude,
             "search":     self._cmd_search,
             "log":        self._cmd_log,
+            "lookup":     self._cmd_lookup,
             "save":       self._cmd_save,
             "config":     self._cmd_config,
             "quit":       self._cmd_quit,
@@ -485,6 +492,7 @@ class DXClusterTUI:
         self._print("  exclude  <prefix…>                  – add to exclude blacklist")
         self._print("  status                              – connection & filter summary")
         self._print("  json     [on|off]                   – toggle JSON output")
+        self._print("  lookup   <callsign|prefix>          – show country and CQ zone")
         self._print("  save                                – save settings now")
         self._print("  config                              – show config file path")
         self._print("  quit                                – exit")
@@ -833,6 +841,25 @@ class DXClusterTUI:
     async def _cmd_log(self, args: list[str]) -> None:
         self._print(f"Spot log: {self._log.size()} spots stored (last 24 h)")
         self._print(f"Log file: {log_path()}")
+
+    async def _cmd_lookup(self, args: list[str]) -> None:
+        """lookup <callsign|prefix>  – show country name and CQ zone."""
+        if not args:
+            self._print("Usage: lookup <callsign or prefix>  e.g. lookup G3SXW  or  lookup JA")
+            return
+        from dxcluster.dxcc import cq_zone_for
+        for arg in args:
+            key     = resolve_entity(arg)
+            country = entity_name(key) if key else "(unknown prefix)"
+            zone    = cq_zone_for(arg)
+            zone_str = f"CQ Zone {zone}" if zone else "zone unknown"
+            prefixes = describe_entity(arg)   # "England (G, M, 2E)"
+            self._write_line([
+                ("ansibrightwhite",  f"{arg.upper():<10} "),
+                ("ansicyan",         f"{country:<18} "),
+                ("ansibrightyellow", f"{zone_str:<14} "),
+                ("ansigray",         prefixes),
+            ])
 
     async def _cmd_stream(self, args: list[str]) -> None:
         sub = args[0].lower() if args else None
