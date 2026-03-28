@@ -203,7 +203,7 @@ def _format_spot_parts(spot) -> list:
     key         = resolve_entity(spot.dx_callsign)
     country     = entity_name(key) if key else ""
     return [
-        ("ansibrightwhite",  f"{spot.dx_callsign:<10} "),
+        ("ansiwhite",  f"{spot.dx_callsign:<10} "),
         ("ansicyan",         f"{country:<16} "),
         ("ansicyan",         f"{zone_tag:<4} "),
         ("ansibrightyellow", f"{spot.frequency:>9.1f}  "),
@@ -855,7 +855,7 @@ class DXClusterTUI:
             zone_str = f"CQ Zone {zone}" if zone else "zone unknown"
             prefixes = describe_entity(arg)   # "England (G, M, 2E)"
             self._write_line([
-                ("ansibrightwhite",  f"{arg.upper():<10} "),
+                ("ansiwhite",  f"{arg.upper():<10} "),
                 ("ansicyan",         f"{country:<18} "),
                 ("ansibrightyellow", f"{zone_str:<14} "),
                 ("ansigray",         prefixes),
