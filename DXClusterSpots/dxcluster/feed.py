@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # Key   → short name used on the command line / in the shell
 # Value → (hostname, port)
 KNOWN_CLUSTERS: dict[str, tuple[str, int]] = {
+    # ── Finland (DX Summit) ────────────────────────────────────────────
+    "dxsummit":  ("dxsummit.fi",               7300),  # DX Summit, OH6BG – high-volume aggregator
     # ── Belgium ────────────────────────────────────────────────────────
     "on0nol":    ("nolcluster.on8ar.eu",        7300),  # NOL Radioamateur Club, JO21rd
     # ── Netherlands ────────────────────────────────────────────────────
@@ -57,6 +59,7 @@ KNOWN_CLUSTERS: dict[str, tuple[str, int]] = {
 
 # Human-readable descriptions shown by the 'nodes' command.
 CLUSTER_DESCRIPTIONS: dict[str, str] = {
+    "dxsummit":  "Finland      – DX Summit (OH6BG), high-volume global aggregator",
     "on0nol":    "Belgium      – ON0NOL / NOL Radioamateur Club (JO21rd)",
     "pi4cc":     "Netherlands  – PI4CC, Centrum voor Elektronica",
     "pa6nl":     "Netherlands  – PA6NL, Wassenaar (JO22fd)",
