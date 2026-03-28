@@ -73,6 +73,7 @@ except ImportError:
     HAS_PROMPT_TOOLKIT = False
 
 from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter, SpotLog
+from dxcluster.callbook import lookup_hamqth, lookup_qrz
 from dxcluster.config import (
     AppConfig, FilterConfig, load_config, save_config,
     config_path as config_file_path, history_path, log_path,
@@ -140,7 +141,7 @@ _STYLE = Style.from_dict({
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
     "filter", "stream", "status", "json", "worked", "w",
-    "include", "exclude", "search", "log", "lookup", "save", "config", "quit", "exit", "q",
+    "include", "exclude", "search", "log", "lookup", "callbook", "save", "config", "quit", "exit", "q",
 ]
 
 _HELP: dict[str, str] = {
@@ -192,16 +193,45 @@ _HELP: dict[str, str] = {
     "search": (
         "search freq <kHz>           – spots within ±5 kHz in last 24 h\n"
         "search call <pattern>       – spots where DX or spotter matches pattern\n"
+        "search prefix <prefix>      – all spots from the same DXCC entity as prefix\n"
         "\n"
-        "  Results are ordered chronologically.  All spots from the last 24\n"
-        "  hours are logged regardless of active filters, so you can search\n"
-        "  for spots you filtered out.\n"
+        "  'search prefix' expands the prefix to ALL callsign prefixes for that\n"
+        "  DXCC entity and matches the DX callsign (not the spotter).\n"
+        "  Examples: 'search prefix EA' finds EA, EB, EC … (all Spain)\n"
+        "            'search prefix GM' finds GM, MM, 2M (Scotland)\n"
+        "            'search prefix ED' finds EA/EB/EC … (same entity as Spain)\n"
+        "\n"
+        "  Results are ordered chronologically.  All 24-h spots are logged\n"
+        "  regardless of active filters.\n"
         "\n"
         "  Examples:\n"
         "    search freq 14074\n"
         "    search freq 7040.5\n"
         "    search call G3SXW\n"
-        "    search call ON4"
+        "    search call ON4\n"
+        "    search prefix VK\n"
+        "    search prefix GM"
+    ),
+    "callbook": (
+        "callbook <callsign>                   – look up full details from QRZ/HamQTH\n"
+        "callbook set hamqth <user> <pass>     – save HamQTH credentials\n"
+        "callbook set qrz <user> <pass>        – save QRZ.com credentials\n"
+        "callbook show                         – show which services are configured\n"
+        "\n"
+        "  Queries configured callbook service(s) and displays:\n"
+        "    name, QTH, country, grid square, CQ/ITU zone,\n"
+        "    email, website, QSL info (LoTW / eQSL / direct / bureau).\n"
+        "\n"
+        "  Services (configure at least one):\n"
+        "    HamQTH  – free registration at https://www.hamqth.com\n"
+        "    QRZ.com – requires paid XML Data subscription\n"
+        "\n"
+        "  Credentials are stored in the local config file (plain text).\n"
+        "\n"
+        "  Examples:\n"
+        "    callbook G3SXW\n"
+        "    callbook set hamqth myuser mypassword\n"
+        "    callbook set qrz AA7BQ myqrzpassword"
     ),
     "log": "log\n\n  Show spot log statistics (total spots stored, file location).",
     "worked": (
@@ -646,6 +676,7 @@ class DXClusterTUI:
             "search":     self._cmd_search,
             "log":        self._cmd_log,
             "lookup":     self._cmd_lookup,
+            "callbook":   self._cmd_callbook,
             "save":       self._cmd_save,
             "config":     self._cmd_config,
             "quit":       self._cmd_quit,
@@ -683,7 +714,8 @@ class DXClusterTUI:
         self._print("  exclude  <prefix…>                  – add to exclude blacklist")
         self._print("  status                              – connection & filter summary")
         self._print("  json     [on|off]                   – toggle JSON output")
-        self._print("  lookup   <callsign|prefix>          – show country and CQ zone")
+        self._print("  lookup   <callsign|prefix>          – show country and CQ zone (local)")
+        self._print("  callbook <callsign>                 – full lookup via QRZ/HamQTH")
         self._print("  save                                – save settings now")
         self._print("  config                              – show config file path")
         self._print("  quit                                – exit")
@@ -960,14 +992,14 @@ class DXClusterTUI:
         self._print(f"Unknown zone sub-command '{sub}'.  Use: add, remove, open, close, show")
 
     async def _cmd_search(self, args: list[str]) -> None:
-        """search freq <kHz> | search call <pattern>"""
+        """search freq <kHz> | search call <pattern> | search prefix <prefix>"""
         if len(args) < 2:
             self._print(
                 "Usage:\n"
                 "  search freq <kHz>       – spots within ±5 kHz in last 24 h\n"
                 "  search call <pattern>   – spots matching callsign pattern\n"
-                "  search call G3SXW\n"
-                "  search freq 14074"
+                "  search prefix <prefix>  – all spots from the same DXCC entity\n"
+                "  search freq 14074 | search call G3SXW | search prefix VK"
             )
             return
 
@@ -1007,8 +1039,39 @@ class DXClusterTUI:
                 )
             self._print("─" * 78)
 
+        elif sub == "prefix":
+            from dxcluster.dxcc import all_prefixes_for, entity_name, resolve_entity as _resolve
+            user_pfx = args[1]
+            entity_key = _resolve(user_pfx)
+            if entity_key is None:
+                self._print(
+                    f"Unknown prefix '{user_pfx}'.  "
+                    "Try 'lookup <prefix>' to check what entity a prefix maps to."
+                )
+                return
+            country = entity_name(entity_key)
+            pfx_list = all_prefixes_for(user_pfx)  # e.g. ["EA","EB","EC",...] for Spain
+            results = self._log.search_entity(pfx_list)
+            if not results:
+                self._print(
+                    f"No spots from {country} ({', '.join(pfx_list[:6])}"
+                    f"{'…' if len(pfx_list) > 6 else ''}) in the last 24 hours."
+                )
+                return
+            self._print(
+                f"Spots from {country} ({', '.join(pfx_list[:6])}"
+                f"{'…' if len(pfx_list) > 6 else ''}) — last 24 h ({len(results)} found):"
+            )
+            self._print("─" * 78)
+            for s in results:
+                ts = s.received_at.strftime("%H:%M")
+                self._write_line(
+                    [("ansidarkgray", f"{ts} ")] + _format_spot_parts(s)
+                )
+            self._print("─" * 78)
+
         else:
-            self._print(f"Unknown search type '{sub}'.  Use: freq, call")
+            self._print(f"Unknown search type '{sub}'.  Use: freq, call, prefix")
 
     async def _cmd_log(self, args: list[str]) -> None:
         self._print(f"Spot log: {self._log.size()} spots stored (last 24 h)")
@@ -1032,6 +1095,125 @@ class DXClusterTUI:
                 ("ansibrightyellow", f"{zone_str:<14} "),
                 ("ansigray",         prefixes),
             ])
+
+    async def _cmd_callbook(self, args: list[str]) -> None:
+        """callbook <callsign> | callbook set <service> <user> <pass> | callbook show"""
+        if not args:
+            self._print("Usage: callbook <callsign>  |  callbook set hamqth/qrz <user> <pass>  |  callbook show")
+            return
+
+        sub = args[0].lower()
+
+        # ── callbook show ──────────────────────────────────────────────────────
+        if sub == "show":
+            cb = self._cfg.callbook
+            self._print("Callbook services:")
+            if cb.hamqth_user:
+                self._write_line([("ansibrightgreen", "  HamQTH  "), ("ansiwhite", f"configured ({cb.hamqth_user})")])
+            else:
+                self._write_line([("ansigray", "  HamQTH  "), ("ansigray", "not configured  (callbook set hamqth <user> <pass>)")])
+            if cb.qrz_user:
+                self._write_line([("ansibrightgreen", "  QRZ.com "), ("ansiwhite", f"configured ({cb.qrz_user})")])
+            else:
+                self._write_line([("ansigray", "  QRZ.com "), ("ansigray", "not configured  (callbook set qrz <user> <pass>)")])
+            return
+
+        # ── callbook set <service> <user> <pass> ──────────────────────────────
+        if sub == "set":
+            if len(args) < 4:
+                self._print("Usage: callbook set hamqth <username> <password>\n"
+                            "       callbook set qrz <username> <password>")
+                return
+            svc  = args[1].lower()
+            user = args[2]
+            pwd  = args[3]
+            if svc == "hamqth":
+                self._cfg.callbook.hamqth_user = user
+                self._cfg.callbook.hamqth_pass = pwd
+                save_config(self._cfg)
+                self._print(f"HamQTH credentials saved for user '{user}'.")
+            elif svc == "qrz":
+                self._cfg.callbook.qrz_user = user
+                self._cfg.callbook.qrz_pass = pwd
+                save_config(self._cfg)
+                self._print(f"QRZ.com credentials saved for user '{user}'.")
+            else:
+                self._print(f"Unknown service '{svc}'.  Use: hamqth  or  qrz")
+            return
+
+        # ── callbook <callsign> ────────────────────────────────────────────────
+        # Anything that is not a sub-command keyword is treated as a callsign.
+        callsign = args[0].upper()
+        cb = self._cfg.callbook
+
+        if not cb.hamqth_user and not cb.qrz_user:
+            self._print(
+                "No callbook service configured.\n"
+                "  callbook set hamqth <username> <password>   (free registration at hamqth.com)\n"
+                "  callbook set qrz    <username> <password>   (requires QRZ XML subscription)"
+            )
+            return
+
+        self._print(f"Looking up {callsign}…")
+        if self._app:
+            self._app.invalidate()
+
+        results_shown = 0
+
+        # Try HamQTH first (free, usually faster).
+        if cb.hamqth_user:
+            entry = await lookup_hamqth(callsign, cb.hamqth_user, cb.hamqth_pass)
+            if entry.error:
+                self._write_line([("ansiyellow", f"  HamQTH: "), ("ansigray", entry.error)])
+            else:
+                self._display_callbook_entry(entry)
+                results_shown += 1
+
+        # Try QRZ.com if configured (and HamQTH either failed or wasn't configured).
+        if cb.qrz_user and results_shown == 0:
+            entry = await lookup_qrz(callsign, cb.qrz_user, cb.qrz_pass)
+            if entry.error:
+                self._write_line([("ansiyellow", f"  QRZ.com: "), ("ansigray", entry.error)])
+            else:
+                self._display_callbook_entry(entry)
+                results_shown += 1
+
+        if results_shown == 0:
+            self._print(f"No callbook data found for {callsign}.")
+
+    def _display_callbook_entry(self, e) -> None:
+        """Render a CallbookEntry as coloured lines in the output pane."""
+        self._write_line([
+            ("ansibrightgreen", f"  [{e.source}] "),
+            ("ansiwhite bold",  f"{e.callsign}  "),
+            ("ansiwhite",       e.name),
+        ])
+        if e.qth or e.country:
+            loc = ", ".join(p for p in [e.qth, e.country] if p)
+            self._write_line([("ansigray", "  QTH     : "), ("ansicyan", loc)])
+        if e.grid:
+            self._write_line([("ansigray", "  Grid    : "), ("ansiwhite", e.grid)])
+        zone_parts = []
+        if e.cq_zone:
+            zone_parts.append(f"CQ {e.cq_zone}")
+        if e.itu_zone:
+            zone_parts.append(f"ITU {e.itu_zone}")
+        if zone_parts:
+            self._write_line([("ansigray", "  Zone    : "), ("ansibrightyellow", "  ".join(zone_parts))])
+        if e.email:
+            self._write_line([("ansigray", "  Email   : "), ("ansiwhite", e.email)])
+        if e.web:
+            self._write_line([("ansigray", "  Web     : "), ("ansiwhite", e.web)])
+        # Build QSL flags line
+        qsl_parts = []
+        if e.lotw:        qsl_parts.append("LoTW")
+        if e.eqsl:        qsl_parts.append("eQSL")
+        if e.qsl_direct:  qsl_parts.append("Direct")
+        if e.qsl_bureau:  qsl_parts.append("Bureau")
+        if qsl_parts:
+            self._write_line([("ansigray", "  QSL     : "), ("ansibrightgreen", "  ".join(qsl_parts))])
+        elif any([e.lotw, e.eqsl, e.qsl_direct, e.qsl_bureau]) is False:
+            self._write_line([("ansigray", "  QSL     : "), ("ansidarkgray", "no QSL info available")])
 
     async def _cmd_stream(self, args: list[str]) -> None:
         sub = args[0].lower() if args else None
