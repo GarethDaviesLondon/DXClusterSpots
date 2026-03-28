@@ -4,6 +4,7 @@ import re
 from typing import Optional
 
 from .bands import frequency_to_band
+from .dxcc import cq_zone_for
 from .models import DXSpot
 
 # Standard DX spot line format:
@@ -72,13 +73,15 @@ def parse_spot(line: str) -> Optional[DXSpot]:
     frequency = float(freq_str)
     comment = comment.strip()
 
+    dx_callsign = dx_call.upper()
     return DXSpot(
         spotter=spotter.rstrip(":"),
         frequency=frequency,
-        dx_callsign=dx_call.upper(),
+        dx_callsign=dx_callsign,
         comment=comment,
         time_str=time_str.upper(),
         band=frequency_to_band(frequency),
         mode=parse_mode(comment),
+        zone=cq_zone_for(dx_callsign),
         raw=line.rstrip(),
     )

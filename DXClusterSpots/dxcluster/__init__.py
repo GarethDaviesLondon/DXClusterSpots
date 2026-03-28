@@ -9,17 +9,19 @@ Public API::
 from .bands import BAND_PLAN, band_to_range, frequency_to_band
 from .client import DXClusterClient
 from .config import AppConfig, FilterConfig, load_config, save_config
-from .dxcc import all_prefixes_for, callsign_prefix, describe_entity, resolve_entity
+from .dxcc import all_prefixes_for, callsign_prefix, cq_zone_for, describe_entity, resolve_entity
 from .feed import CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed
 from .filters import SpotFilter, build_filter_from_config
 from .models import DXSpot
 from .parser import parse_spot, parse_mode
+from .spotlog import SpotLog
 
 __all__ = [
     "DXSpot",
     "DXClusterClient",
     "SpotFeed",
     "SpotFilter",
+    "SpotLog",
     "build_filter_from_config",
     "parse_spot",
     "parse_mode",
@@ -36,6 +38,7 @@ __all__ = [
     "all_prefixes_for",
     "callsign_prefix",
     "describe_entity",
+    "cq_zone_for",
 ]
 
 __version__ = "0.1.0"

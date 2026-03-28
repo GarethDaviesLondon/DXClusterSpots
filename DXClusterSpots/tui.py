@@ -39,10 +39,10 @@ try:
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
 
-from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter
+from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter, SpotLog
 from dxcluster.config import (
     AppConfig, FilterConfig, load_config, save_config,
-    config_path as config_file_path, history_path,
+    config_path as config_file_path, history_path, log_path,
 )
 from dxcluster.dxcc import describe_entity
 from dxcluster.filters import build_filter_from_config
@@ -96,7 +96,7 @@ _STYLE = Style.from_dict({
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
     "filter", "stream", "status", "json", "worked", "w",
-    "include", "exclude", "save", "config", "quit", "exit", "q",
+    "include", "exclude", "search", "log", "save", "config", "quit", "exit", "q",
 ]
 
 _HELP: dict[str, str] = {
@@ -119,10 +119,19 @@ _HELP: dict[str, str] = {
         "  Subcommands:\n"
         "    filter band   <band...>          20m, 40m, 80m …\n"
         "    filter mode   <mode...>          CW, SSB, FT8, RTTY, DIGI …\n"
+        "    filter zone   add <zone...>      add CQ zone(s) to allow list\n"
+        "    filter zone   remove <zone...>   remove CQ zone(s) from allow list\n"
+        "    filter zone   open               accept all zones (default)\n"
+        "    filter zone   close              reject all zones\n"
+        "    filter zone   show               show current zone filter\n"
         "    filter dx include <prefix...>    show ONLY these DXCC entities\n"
         "    filter dx exclude <prefix...>    hide these DXCC entities\n"
-        "    filter show                      display active filters\n"
+        "    filter show                      display all active filters\n"
         "    filter clear                     remove all filters\n"
+        "\n"
+        "  CQ zones: 1=Alaska  3-5=USA  6=Mexico  7-9=Caribbean/SA\n"
+        "    14=W.Europe  15=E.Europe  16=Russia/EU  20=Balkans/Turkey\n"
+        "    21=Middle East  24=China  25=Japan  29-30=Australia  32=NZ\n"
         "\n"
         "  DXCC entity resolution:\n"
         "    'G'  → England  : G, M, 2E\n"
@@ -131,6 +140,21 @@ _HELP: dict[str, str] = {
         "\n"
         "  Filters are saved and reloaded on next start."
     ),
+    "search": (
+        "search freq <kHz>           – spots within ±5 kHz in last 24 h\n"
+        "search call <pattern>       – spots where DX or spotter matches pattern\n"
+        "\n"
+        "  Results are ordered chronologically.  All spots from the last 24\n"
+        "  hours are logged regardless of active filters, so you can search\n"
+        "  for spots you filtered out.\n"
+        "\n"
+        "  Examples:\n"
+        "    search freq 14074\n"
+        "    search freq 7040.5\n"
+        "    search call G3SXW\n"
+        "    search call ON4"
+    ),
+    "log": "log\n\n  Show spot log statistics (total spots stored, file location).",
     "worked": (
         "worked <prefix...>  (alias: w)\n"
         "\n"
@@ -167,13 +191,15 @@ def _format_spot_parts(spot) -> list:
     mode_colour = _MODE_COLOURS.get(spot.mode or "", "ansigray")
     band_tag    = f"[{spot.band}]" if spot.band else "[?]  "
     mode_tag    = f"{spot.mode}" if spot.mode else ""
+    zone_tag    = f"Z{spot.zone}" if spot.zone else "   "
     return [
         (band_colour,        f"{band_tag:<7}"),
         (mode_colour,        f"{mode_tag:<5} "),
+        ("ansicyan",         f"{zone_tag:<4} "),
         ("ansiwhite",        f"DX de {spot.spotter:<12} "),
         ("ansibrightyellow", f"{spot.frequency:>9.1f} kHz  "),
         ("ansiwhite",        f"{spot.dx_callsign:<12} "),
-        ("ansigray",         f"{spot.comment:<33} "),
+        ("ansigray",         f"{spot.comment:<30} "),
         ("ansidarkgray",     spot.time_str),
     ]
 
@@ -196,6 +222,7 @@ class DXClusterTUI:
         self._spot_count: int = 0
         self._json_mode: bool = self._cfg.json_mode
         self._app: Optional[Application] = None
+        self._log: SpotLog = SpotLog(log_path())
 
         # Each entry: list of (style, text) tuples for one output line
         self._output_lines: list[list] = []
@@ -404,6 +431,8 @@ class DXClusterTUI:
             "w":          self._cmd_worked,
             "include":    self._cmd_include,
             "exclude":    self._cmd_exclude,
+            "search":     self._cmd_search,
+            "log":        self._cmd_log,
             "save":       self._cmd_save,
             "config":     self._cmd_config,
             "quit":       self._cmd_quit,
@@ -563,6 +592,10 @@ class DXClusterTUI:
             f.modes = sorted({*f.modes, *[v.upper() for v in values]})
             self._print(f"Mode filter: {', '.join(f.modes)}")
 
+        elif sub == "zone":
+            await self._cmd_filter_zone(values)
+            return  # already saves inside
+
         elif sub == "dx":
             if not values:
                 self._print("Usage: filter dx include|exclude <prefix…>")
@@ -583,7 +616,7 @@ class DXClusterTUI:
         else:
             self._print(
                 f"Unknown filter sub-command '{sub}'.\n"
-                "  Use: band, mode, dx include/exclude, show, clear"
+                "  Use: band, mode, zone, dx include/exclude, show, clear"
             )
             return
 
@@ -607,6 +640,163 @@ class DXClusterTUI:
             self._print("Usage: exclude <prefix…>  e.g. exclude G ON")
             return
         await self._do_exclude(args)
+
+    async def _cmd_filter_zone(self, args: list[str]) -> None:
+        """Handle: filter zone add/remove/open/close/show [zone...]"""
+        if not args:
+            self._print(
+                "Usage: filter zone <add|remove|open|close|show> [zone...]\n"
+                "  filter zone open            – accept all zones (remove zone filter)\n"
+                "  filter zone close           – reject all zones\n"
+                "  filter zone add 14 15       – add zones to allow list\n"
+                "  filter zone remove 14       – remove zone from allow list\n"
+                "  filter zone show            – display current zone filter"
+            )
+            return
+
+        sub = args[0].lower()
+
+        if sub == "show":
+            z = self._cfg.filters.cq_zones
+            if z is None:
+                self._print("  Zone filter : all zones open (no filtering)")
+            elif len(z) == 0:
+                self._print("  Zone filter : ALL CLOSED (no spots will pass zone filter)")
+            else:
+                self._print(f"  Zone filter : accepting zones {', '.join(str(n) for n in sorted(z))}")
+            return
+
+        if sub == "open":
+            self._cfg.filters.cq_zones = None
+            self._apply_filter_to_feed()
+            save_config(self._cfg)
+            self._print("Zone filter removed – all zones accepted.")
+            return
+
+        if sub == "close":
+            self._cfg.filters.cq_zones = []
+            self._apply_filter_to_feed()
+            save_config(self._cfg)
+            self._print("Zone filter closed – no zones accepted.  Use 'filter zone add <n>' to open specific zones.")
+            return
+
+        if sub in ("add", "remove"):
+            zone_args = args[1:]
+            if not zone_args:
+                self._print(f"Usage: filter zone {sub} <zone...>  e.g. filter zone add 14 15")
+                return
+            try:
+                zones = [int(z) for z in zone_args]
+            except ValueError:
+                self._print(f"Zone numbers must be integers, e.g. 14  (got: {' '.join(zone_args)})")
+                return
+            invalid = [z for z in zones if not (1 <= z <= 40)]
+            if invalid:
+                self._print(f"Invalid CQ zone(s): {invalid}  (valid range: 1–40)")
+                return
+
+            current = self._cfg.filters.cq_zones
+            if sub == "add":
+                if current is None:
+                    # Was all-open; switching to an explicit allow list means we start
+                    # with these zones only.  Warn the user.
+                    self._cfg.filters.cq_zones = sorted(set(zones))
+                    self._print(
+                        f"Zone filter created with zones: {', '.join(str(z) for z in self._cfg.filters.cq_zones)}\n"
+                        "  (was all-open; now only these zones pass – use 'filter zone open' to undo)"
+                    )
+                else:
+                    self._cfg.filters.cq_zones = sorted(set(current) | set(zones))
+                    self._print(f"Zone filter: now accepting {', '.join(str(z) for z in self._cfg.filters.cq_zones)}")
+            else:  # remove
+                if current is None:
+                    self._print("Zone filter is currently all-open.  Use 'filter zone close' first, then add the zones you want.")
+                    return
+                self._cfg.filters.cq_zones = sorted(set(current) - set(zones))
+                if self._cfg.filters.cq_zones:
+                    self._print(f"Zone filter: now accepting {', '.join(str(z) for z in self._cfg.filters.cq_zones)}")
+                else:
+                    self._print("Zone filter: all zones removed – nothing will pass.  Use 'filter zone open' to accept all.")
+
+            self._apply_filter_to_feed()
+            save_config(self._cfg)
+            return
+
+        self._print(f"Unknown zone sub-command '{sub}'.  Use: add, remove, open, close, show")
+
+    async def _cmd_search(self, args: list[str]) -> None:
+        """search freq <kHz> | search call <pattern>"""
+        if len(args) < 2:
+            self._print(
+                "Usage:\n"
+                "  search freq <kHz>       – spots within ±5 kHz in last 24 h\n"
+                "  search call <pattern>   – spots matching callsign pattern\n"
+                "  search call G3SXW\n"
+                "  search freq 14074"
+            )
+            return
+
+        sub = args[0].lower()
+
+        if sub == "freq":
+            try:
+                freq = float(args[1])
+            except ValueError:
+                self._print(f"Expected a frequency in kHz, got '{args[1]}'")
+                return
+            results = self._log.search_frequency(freq, window_khz=5.0)
+            if not results:
+                self._print(f"No spots found within ±5 kHz of {freq} kHz in the last 24 hours.")
+                return
+            self._print(f"Spots within ±5 kHz of {freq:.1f} kHz — last 24 h ({len(results)} found):")
+            self._print("─" * 78)
+            for s in results:
+                ts = s.received_at.strftime("%H:%M")
+                zone_tag = f"Z{s.zone}" if s.zone else "   "
+                mode_tag = f"{s.mode:<5}" if s.mode else "     "
+                self._write_line([
+                    ("ansidarkgray",    f" {ts} "),
+                    ("ansibrightyellow",f"{s.frequency:>9.1f} kHz  "),
+                    ("ansibrightgreen", f"{mode_tag} "),
+                    ("ansicyan",        f"{zone_tag} "),
+                    ("ansiwhite",       f"DX de {s.spotter:<12} "),
+                    ("ansiwhite",       f"{s.dx_callsign:<12} "),
+                    ("ansigray",        f"{s.comment:<30} "),
+                    ("ansidarkgray",    s.time_str),
+                ])
+            self._print("─" * 78)
+
+        elif sub == "call":
+            pattern = args[1]
+            results = self._log.search_callsign(pattern)
+            if not results:
+                self._print(f"No spots matching '{pattern}' in the last 24 hours.")
+                return
+            self._print(f"Spots matching '{pattern.upper()}' — last 24 h ({len(results)} found):")
+            self._print("─" * 78)
+            for s in results:
+                ts = s.received_at.strftime("%H:%M")
+                band_tag = f"[{s.band}]" if s.band else "[?]  "
+                mode_tag = f"{s.mode:<5}" if s.mode else "     "
+                zone_tag = f"Z{s.zone}" if s.zone else "   "
+                self._write_line([
+                    ("ansidarkgray",    f" {ts} "),
+                    ("ansibrightgreen", f"{band_tag:<7} {mode_tag} "),
+                    ("ansicyan",        f"{zone_tag} "),
+                    ("ansibrightyellow",f"{s.frequency:>9.1f} kHz  "),
+                    ("ansiwhite",       f"DX de {s.spotter:<12} "),
+                    ("ansiwhite",       f"{s.dx_callsign:<12} "),
+                    ("ansigray",        f"{s.comment:<30} "),
+                    ("ansidarkgray",    s.time_str),
+                ])
+            self._print("─" * 78)
+
+        else:
+            self._print(f"Unknown search type '{sub}'.  Use: freq, call")
+
+    async def _cmd_log(self, args: list[str]) -> None:
+        self._print(f"Spot log: {self._log.size()} spots stored (last 24 h)")
+        self._print(f"Log file: {log_path()}")
 
     async def _cmd_stream(self, args: list[str]) -> None:
         sub = args[0].lower() if args else None
@@ -678,7 +868,8 @@ class DXClusterTUI:
 
     def _show_filters(self) -> None:
         f = self._cfg.filters
-        has_any = any([f.bands, f.modes, f.include_prefixes, f.exclude_prefixes])
+        has_any = any([f.bands, f.modes, f.include_prefixes, f.exclude_prefixes,
+                       f.cq_zones is not None])
         if not has_any:
             self._print("  Filters   : none (all spots shown)")
             return
@@ -687,6 +878,12 @@ class DXClusterTUI:
             self._print(f"    band    : {', '.join(sorted(f.bands))}")
         if f.modes:
             self._print(f"    mode    : {', '.join(sorted(f.modes))}")
+        if f.cq_zones is None:
+            pass  # all-open is the default, no need to mention it
+        elif len(f.cq_zones) == 0:
+            self._print("    zones   : ALL CLOSED")
+        else:
+            self._print(f"    zones   : {', '.join(str(z) for z in sorted(f.cq_zones))}")
         if f.include_prefixes:
             descs = [describe_entity(p) for p in f.include_prefixes]
             self._print(f"    include : {'; '.join(descs)}")
@@ -736,6 +933,7 @@ class DXClusterTUI:
         try:
             async for spot in self._feed.spots():
                 self._spot_count += 1
+                self._log.append(spot)   # log ALL spots (before display filter)
                 if self._json_mode:
                     self._write_line([("", spot.to_json())])
                 else:

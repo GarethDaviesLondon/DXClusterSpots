@@ -49,6 +49,11 @@ def history_path() -> str:
     return path
 
 
+def log_path() -> str:
+    """Return the full path to the 24-hour spot log file."""
+    return os.path.join(_config_dir(), "spots.log")
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------
@@ -71,6 +76,8 @@ class FilterConfig:
     include_prefixes: list[str] = field(default_factory=list)
     # exclude_prefixes: hide spots from these entities (worked list)
     exclude_prefixes: list[str] = field(default_factory=list)
+    # cq_zones: None = all zones accepted; [] = all closed; [14,15] = whitelist
+    cq_zones: object = None  # Optional[list[int]]
 
 
 @dataclass
@@ -109,6 +116,7 @@ class AppConfig:
                 modes=filt_d.get("modes", []),
                 include_prefixes=filt_d.get("include_prefixes", []),
                 exclude_prefixes=filt_d.get("exclude_prefixes", []),
+                cq_zones=filt_d.get("cq_zones", None),
             ),
             json_mode=d.get("json_mode", False),
             auto_stream=d.get("auto_stream", True),

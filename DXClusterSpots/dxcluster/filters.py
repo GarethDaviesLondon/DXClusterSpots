@@ -48,6 +48,17 @@ class SpotFilter:
         )
         return self
 
+    def cq_zone(self, *zones: int) -> "SpotFilter":
+        """Accept only spots from the given CQ zone(s).
+
+        An empty zone list rejects every spot (all-closed state).
+        """
+        zone_set = set(zones)
+        self._predicates.append(
+            lambda s, zs=zone_set: s.zone is not None and s.zone in zs
+        )
+        return self
+
     def frequency_range(self, low_khz: float, high_khz: float) -> "SpotFilter":
         """Accept spots within a specific frequency range (kHz)."""
         self._predicates.append(lambda s: low_khz <= s.frequency <= high_khz)
@@ -175,7 +186,10 @@ def _match_any_prefix(callsign: str, prefix_set: frozenset[str]) -> bool:
 def build_filter_from_config(cfg_filters) -> Optional[SpotFilter]:
     """Build a SpotFilter from a FilterConfig object, or None if no filters."""
     f = cfg_filters
-    has_filter = any([f.bands, f.modes, f.include_prefixes, f.exclude_prefixes])
+    has_filter = any([
+        f.bands, f.modes, f.include_prefixes, f.exclude_prefixes,
+        f.cq_zones is not None,
+    ])
     if not has_filter:
         return None
     sf = SpotFilter()
@@ -187,4 +201,7 @@ def build_filter_from_config(cfg_filters) -> Optional[SpotFilter]:
         sf.dx_include(*f.include_prefixes)
     if f.exclude_prefixes:
         sf.dx_exclude(*f.exclude_prefixes)
+    if f.cq_zones is not None:
+        # None = all open (no predicate); empty list = all closed; list = whitelist
+        sf.cq_zone(*f.cq_zones)
     return sf
