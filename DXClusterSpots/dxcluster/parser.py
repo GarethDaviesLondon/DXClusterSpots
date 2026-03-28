@@ -74,8 +74,9 @@ def parse_spot(line: str) -> Optional[DXSpot]:
     comment = comment.strip()
 
     dx_callsign = dx_call.upper()
+    spotter_call = spotter.rstrip(":")
     return DXSpot(
-        spotter=spotter.rstrip(":"),
+        spotter=spotter_call,
         frequency=frequency,
         dx_callsign=dx_callsign,
         comment=comment,
@@ -83,5 +84,6 @@ def parse_spot(line: str) -> Optional[DXSpot]:
         band=frequency_to_band(frequency),
         mode=parse_mode(comment),
         zone=cq_zone_for(dx_callsign),
+        spotter_zone=cq_zone_for(spotter_call),
         raw=line.rstrip(),
     )

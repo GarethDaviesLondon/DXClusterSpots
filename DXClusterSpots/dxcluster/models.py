@@ -19,10 +19,11 @@ class DXSpot:
     dx_callsign: str      # callsign of the spotted station
     comment: str          # free-text comment from the spotter
     time_str: str         # UTC time string from the cluster, e.g. "1234Z"
-    band: Optional[str] = None   # derived band name, e.g. "20m"
-    mode: Optional[str] = None   # derived operating mode, e.g. "CW", "FT8"
-    zone: Optional[int] = None   # CQ zone of the DX station
-    raw: str = ""                # original unparsed line
+    band: Optional[str] = None         # derived band name, e.g. "20m"
+    mode: Optional[str] = None         # derived operating mode, e.g. "CW", "FT8"
+    zone: Optional[int] = None         # CQ zone of the DX station
+    spotter_zone: Optional[int] = None # CQ zone of the spotter
+    raw: str = ""                      # original unparsed line
     received_at: datetime = field(default_factory=datetime.utcnow)
 
     # ------------------------------------------------------------------
@@ -40,6 +41,7 @@ class DXSpot:
             "band": self.band,
             "mode": self.mode,
             "zone": self.zone,
+            "spotter_zone": self.spotter_zone,
             "received_at": self.received_at.isoformat(),
         }
 
@@ -64,6 +66,7 @@ class DXSpot:
             band=d.get("band"),
             mode=d.get("mode"),
             zone=d.get("zone"),
+            spotter_zone=d.get("spotter_zone"),
             raw=d.get("raw", ""),
             received_at=received_at,
         )

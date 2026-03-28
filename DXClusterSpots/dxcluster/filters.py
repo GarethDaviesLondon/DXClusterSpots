@@ -49,13 +49,24 @@ class SpotFilter:
         return self
 
     def cq_zone(self, *zones: int) -> "SpotFilter":
-        """Accept only spots from the given CQ zone(s).
+        """Accept only spots where the DX station is in one of the given CQ zones.
 
         An empty zone list rejects every spot (all-closed state).
         """
         zone_set = set(zones)
         self._predicates.append(
             lambda s, zs=zone_set: s.zone is not None and s.zone in zs
+        )
+        return self
+
+    def spotter_cq_zone(self, *zones: int) -> "SpotFilter":
+        """Accept only spots filed by a spotter in one of the given CQ zones.
+
+        An empty zone list rejects every spot (all-closed state).
+        """
+        zone_set = set(zones)
+        self._predicates.append(
+            lambda s, zs=zone_set: s.spotter_zone is not None and s.spotter_zone in zs
         )
         return self
 
@@ -188,7 +199,7 @@ def build_filter_from_config(cfg_filters) -> Optional[SpotFilter]:
     f = cfg_filters
     has_filter = any([
         f.bands, f.modes, f.include_prefixes, f.exclude_prefixes,
-        f.cq_zones is not None,
+        f.cq_zones is not None, f.spotter_cq_zones is not None,
     ])
     if not has_filter:
         return None
@@ -202,6 +213,7 @@ def build_filter_from_config(cfg_filters) -> Optional[SpotFilter]:
     if f.exclude_prefixes:
         sf.dx_exclude(*f.exclude_prefixes)
     if f.cq_zones is not None:
-        # None = all open (no predicate); empty list = all closed; list = whitelist
         sf.cq_zone(*f.cq_zones)
+    if f.spotter_cq_zones is not None:
+        sf.spotter_cq_zone(*f.spotter_cq_zones)
     return sf

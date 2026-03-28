@@ -117,15 +117,20 @@ _HELP: dict[str, str] = {
         "filter <subcommand> [values...]\n"
         "\n"
         "  Subcommands:\n"
-        "    filter band   <band...>          20m, 40m, 80m …\n"
-        "    filter mode   <mode...>          CW, SSB, FT8, RTTY, DIGI …\n"
-        "    filter zone   add <zone...>      add CQ zone(s) to allow list\n"
-        "    filter zone   remove <zone...>   remove CQ zone(s) from allow list\n"
-        "    filter zone   open               accept all zones (default)\n"
-        "    filter zone   close              reject all zones\n"
-        "    filter zone   show               show current zone filter\n"
-        "    filter dx include <prefix...>    show ONLY these DXCC entities\n"
-        "    filter dx exclude <prefix...>    hide these DXCC entities\n"
+        "    filter band          <band...>     20m, 40m, 80m …\n"
+        "    filter mode          <mode...>     CW, SSB, FT8, RTTY, DIGI …\n"
+        "    filter zone          add <zone...> DX station: add CQ zone(s) to allow list\n"
+        "    filter zone          remove <n...> DX station: remove CQ zone(s)\n"
+        "    filter zone          open          DX station: accept all zones (default)\n"
+        "    filter zone          close         DX station: reject all zones\n"
+        "    filter zone          show          DX station: show zone filter\n"
+        "    filter spotter zone  add <zone...> Spotter: add CQ zone(s) to allow list\n"
+        "    filter spotter zone  remove <n...> Spotter: remove CQ zone(s)\n"
+        "    filter spotter zone  open          Spotter: accept all zones (default)\n"
+        "    filter spotter zone  close         Spotter: reject all zones\n"
+        "    filter spotter zone  show          Spotter: show zone filter\n"
+        "    filter dx include <prefix...>      show ONLY DX from these DXCC entities\n"
+        "    filter dx exclude <prefix...>      hide DX from these DXCC entities\n"
         "    filter show                      display all active filters\n"
         "    filter clear                     remove all filters\n"
         "\n"
@@ -285,10 +290,16 @@ class DXClusterTUI:
                 parts.append("band:" + ",".join(sorted(f.bands)))
             if f.modes:
                 parts.append("mode:" + ",".join(sorted(f.modes)))
+            if f.cq_zones is not None:
+                z = "CLOSED" if len(f.cq_zones) == 0 else ",".join(str(z) for z in sorted(f.cq_zones))
+                parts.append("dx-z:" + z)
+            if f.spotter_cq_zones is not None:
+                z = "CLOSED" if len(f.spotter_cq_zones) == 0 else ",".join(str(z) for z in sorted(f.spotter_cq_zones))
+                parts.append("sp-z:" + z)
             if f.include_prefixes:
-                parts.append(f"include({len(f.include_prefixes)})")
+                parts.append(f"incl({len(f.include_prefixes)})")
             if f.exclude_prefixes:
-                parts.append(f"exclude({len(f.exclude_prefixes)})")
+                parts.append(f"excl({len(f.exclude_prefixes)})")
             filters_str = "  │  " + "  ".join(parts) if parts else ""
             return [("class:status",
                      f" {state}  │  {conn}  │  {self._spot_count} spots"
@@ -401,14 +412,18 @@ class DXClusterTUI:
                 f"Worked/exclude list loaded: {n} ent{'ities' if n != 1 else 'ity'}"
                 "  (type 'filter show' to review)"
             )])
-        if self._cfg.filters.bands or self._cfg.filters.modes:
-            f = self._cfg.filters
-            parts = []
-            if f.bands:  parts.append("band:" + ",".join(sorted(f.bands)))
-            if f.modes:  parts.append("mode:" + ",".join(sorted(f.modes)))
-            self._write_line([("ansicyan",
-                "Active filters: " + "  ".join(parts)
-            )])
+        f = self._cfg.filters
+        active_parts = []
+        if f.bands:           active_parts.append("band:" + ",".join(sorted(f.bands)))
+        if f.modes:           active_parts.append("mode:" + ",".join(sorted(f.modes)))
+        if f.cq_zones is not None:
+            z = "CLOSED" if not f.cq_zones else ",".join(str(n) for n in sorted(f.cq_zones))
+            active_parts.append("dx-zone:" + z)
+        if f.spotter_cq_zones is not None:
+            z = "CLOSED" if not f.spotter_cq_zones else ",".join(str(n) for n in sorted(f.spotter_cq_zones))
+            active_parts.append("spotter-zone:" + z)
+        if active_parts:
+            self._write_line([("ansicyan", "Active filters: " + "  ".join(active_parts))])
 
     # ── Dispatcher ────────────────────────────────────────────────────────────
 
@@ -464,7 +479,7 @@ class DXClusterTUI:
         self._print("  nodes                               – list known nodes")
         self._print("  bands                               – show band plan")
         self._print("  stream   [start|stop]               – toggle live spot stream")
-        self._print("  filter   band|mode|dx|show|clear    – manage filters")
+        self._print("  filter   band|mode|zone|spotter zone|dx|show|clear")
         self._print("  worked   <prefix…>  (alias: w)      – add to worked/exclude list")
         self._print("  include  <prefix…>                  – add to include whitelist")
         self._print("  exclude  <prefix…>                  – add to exclude blacklist")
@@ -593,8 +608,19 @@ class DXClusterTUI:
             self._print(f"Mode filter: {', '.join(f.modes)}")
 
         elif sub == "zone":
-            await self._cmd_filter_zone(values)
-            return  # already saves inside
+            await self._cmd_filter_zone(values, is_spotter=False)
+            return
+
+        elif sub == "spotter":
+            # filter spotter zone add/remove/open/close/show
+            if not values or values[0].lower() != "zone":
+                self._print(
+                    "Usage: filter spotter zone <add|remove|open|close|show> [zones...]\n"
+                    "  Filters by the CQ zone of the station that filed the spot."
+                )
+                return
+            await self._cmd_filter_zone(values[1:], is_spotter=True)
+            return
 
         elif sub == "dx":
             if not values:
@@ -641,49 +667,61 @@ class DXClusterTUI:
             return
         await self._do_exclude(args)
 
-    async def _cmd_filter_zone(self, args: list[str]) -> None:
-        """Handle: filter zone add/remove/open/close/show [zone...]"""
+    async def _cmd_filter_zone(self, args: list[str], is_spotter: bool = False) -> None:
+        """Handle zone filter for DX station (is_spotter=False) or spotter (is_spotter=True)."""
+        label   = "Spotter zone" if is_spotter else "DX zone"
+        cmd_pfx = "filter spotter zone" if is_spotter else "filter zone"
+
         if not args:
             self._print(
-                "Usage: filter zone <add|remove|open|close|show> [zone...]\n"
-                "  filter zone open            – accept all zones (remove zone filter)\n"
-                "  filter zone close           – reject all zones\n"
-                "  filter zone add 14 15       – add zones to allow list\n"
-                "  filter zone remove 14       – remove zone from allow list\n"
-                "  filter zone show            – display current zone filter"
+                f"Usage: {cmd_pfx} <add|remove|open|close|show> [zone...]\n"
+                f"  {cmd_pfx} open          – accept all zones (default)\n"
+                f"  {cmd_pfx} close         – reject all zones\n"
+                f"  {cmd_pfx} add 14 15     – add zones to allow list\n"
+                f"  {cmd_pfx} remove 14     – remove zone from allow list\n"
+                f"  {cmd_pfx} show          – display current zone filter"
             )
             return
 
         sub = args[0].lower()
 
-        if sub == "show":
-            z = self._cfg.filters.cq_zones
-            if z is None:
-                self._print("  Zone filter : all zones open (no filtering)")
-            elif len(z) == 0:
-                self._print("  Zone filter : ALL CLOSED (no spots will pass zone filter)")
+        def get_zones():
+            return self._cfg.filters.spotter_cq_zones if is_spotter else self._cfg.filters.cq_zones
+
+        def set_zones(val):
+            if is_spotter:
+                self._cfg.filters.spotter_cq_zones = val
             else:
-                self._print(f"  Zone filter : accepting zones {', '.join(str(n) for n in sorted(z))}")
+                self._cfg.filters.cq_zones = val
+
+        if sub == "show":
+            z = get_zones()
+            if z is None:
+                self._print(f"  {label} filter : all zones open (no filtering)")
+            elif len(z) == 0:
+                self._print(f"  {label} filter : ALL CLOSED")
+            else:
+                self._print(f"  {label} filter : accepting zones {', '.join(str(n) for n in sorted(z))}")
             return
 
         if sub == "open":
-            self._cfg.filters.cq_zones = None
+            set_zones(None)
             self._apply_filter_to_feed()
             save_config(self._cfg)
-            self._print("Zone filter removed – all zones accepted.")
+            self._print(f"{label} filter removed – all zones accepted.")
             return
 
         if sub == "close":
-            self._cfg.filters.cq_zones = []
+            set_zones([])
             self._apply_filter_to_feed()
             save_config(self._cfg)
-            self._print("Zone filter closed – no zones accepted.  Use 'filter zone add <n>' to open specific zones.")
+            self._print(f"{label} filter closed.  Use '{cmd_pfx} add <n>' to open specific zones.")
             return
 
         if sub in ("add", "remove"):
             zone_args = args[1:]
             if not zone_args:
-                self._print(f"Usage: filter zone {sub} <zone...>  e.g. filter zone add 14 15")
+                self._print(f"Usage: {cmd_pfx} {sub} <zone...>  e.g. {cmd_pfx} add 14 15")
                 return
             try:
                 zones = [int(z) for z in zone_args]
@@ -695,28 +733,26 @@ class DXClusterTUI:
                 self._print(f"Invalid CQ zone(s): {invalid}  (valid range: 1–40)")
                 return
 
-            current = self._cfg.filters.cq_zones
+            current = get_zones()
             if sub == "add":
                 if current is None:
-                    # Was all-open; switching to an explicit allow list means we start
-                    # with these zones only.  Warn the user.
-                    self._cfg.filters.cq_zones = sorted(set(zones))
+                    set_zones(sorted(set(zones)))
                     self._print(
-                        f"Zone filter created with zones: {', '.join(str(z) for z in self._cfg.filters.cq_zones)}\n"
-                        "  (was all-open; now only these zones pass – use 'filter zone open' to undo)"
+                        f"{label} filter created: {', '.join(str(z) for z in get_zones())}\n"
+                        f"  (was all-open – use '{cmd_pfx} open' to revert)"
                     )
                 else:
-                    self._cfg.filters.cq_zones = sorted(set(current) | set(zones))
-                    self._print(f"Zone filter: now accepting {', '.join(str(z) for z in self._cfg.filters.cq_zones)}")
+                    set_zones(sorted(set(current) | set(zones)))
+                    self._print(f"{label} filter: accepting {', '.join(str(z) for z in get_zones())}")
             else:  # remove
                 if current is None:
-                    self._print("Zone filter is currently all-open.  Use 'filter zone close' first, then add the zones you want.")
+                    self._print(f"{label} filter is all-open.  Use '{cmd_pfx} close' first, then add the zones you want.")
                     return
-                self._cfg.filters.cq_zones = sorted(set(current) - set(zones))
-                if self._cfg.filters.cq_zones:
-                    self._print(f"Zone filter: now accepting {', '.join(str(z) for z in self._cfg.filters.cq_zones)}")
+                set_zones(sorted(set(current) - set(zones)))
+                if get_zones():
+                    self._print(f"{label} filter: accepting {', '.join(str(z) for z in get_zones())}")
                 else:
-                    self._print("Zone filter: all zones removed – nothing will pass.  Use 'filter zone open' to accept all.")
+                    self._print(f"{label} filter: all zones removed.  Use '{cmd_pfx} open' to accept all.")
 
             self._apply_filter_to_feed()
             save_config(self._cfg)
@@ -869,27 +905,31 @@ class DXClusterTUI:
     def _show_filters(self) -> None:
         f = self._cfg.filters
         has_any = any([f.bands, f.modes, f.include_prefixes, f.exclude_prefixes,
-                       f.cq_zones is not None])
+                       f.cq_zones is not None, f.spotter_cq_zones is not None])
         if not has_any:
             self._print("  Filters   : none (all spots shown)")
             return
         self._print("  Filters:")
         if f.bands:
-            self._print(f"    band    : {', '.join(sorted(f.bands))}")
+            self._print(f"    band         : {', '.join(sorted(f.bands))}")
         if f.modes:
-            self._print(f"    mode    : {', '.join(sorted(f.modes))}")
-        if f.cq_zones is None:
-            pass  # all-open is the default, no need to mention it
-        elif len(f.cq_zones) == 0:
-            self._print("    zones   : ALL CLOSED")
-        else:
-            self._print(f"    zones   : {', '.join(str(z) for z in sorted(f.cq_zones))}")
+            self._print(f"    mode         : {', '.join(sorted(f.modes))}")
+        if f.cq_zones is not None:
+            if len(f.cq_zones) == 0:
+                self._print("    dx zone      : ALL CLOSED")
+            else:
+                self._print(f"    dx zone      : {', '.join(str(z) for z in sorted(f.cq_zones))}")
+        if f.spotter_cq_zones is not None:
+            if len(f.spotter_cq_zones) == 0:
+                self._print("    spotter zone : ALL CLOSED")
+            else:
+                self._print(f"    spotter zone : {', '.join(str(z) for z in sorted(f.spotter_cq_zones))}")
         if f.include_prefixes:
             descs = [describe_entity(p) for p in f.include_prefixes]
-            self._print(f"    include : {'; '.join(descs)}")
+            self._print(f"    dx include   : {'; '.join(descs)}")
         if f.exclude_prefixes:
             descs = [describe_entity(p) for p in f.exclude_prefixes]
-            self._print(f"    exclude : {'; '.join(descs)}")
+            self._print(f"    dx exclude   : {'; '.join(descs)}")
 
     # ── Stream management ─────────────────────────────────────────────────────
 
