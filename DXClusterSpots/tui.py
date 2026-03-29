@@ -141,13 +141,15 @@ _STYLE = Style.from_dict({
 
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
-    "filter", "stream", "status", "json", "worked", "w",
-    "include", "exclude", "search", "log", "lookup", "callbook", "save", "config", "quit", "exit", "q",
+    "filter", "stream", "status", "json", "worked",
+    "include", "exclude", "search", "log", "lookup", "callbook", "save", "config", "quit", "exit",
+    # one-letter aliases
+    "h", "c", "d", "n", "b", "s", "f", "w", "i", "e", "/", "l", "t", "j", "u", "k", "v", "g", "q",
 ]
 
 _HELP: dict[str, str] = {
     "connect": (
-        "connect <node|hostname> [callsign] [port]\n"
+        "connect <node|hostname> [callsign] [port]    (alias: c)\n"
         "\n"
         "  Connect to a DXCluster node.  Settings are saved automatically.\n"
         "    node      – known node name (see 'nodes')\n"
@@ -156,11 +158,11 @@ _HELP: dict[str, str] = {
         "\n"
         "  Examples:\n"
         "    connect g6nhu ON4XXX\n"
-        "    connect on0nol ON4XXX\n"
+        "    c g6nhu ON4XXX\n"
         "    connect dxspider.co.uk ON4XXX 7300"
     ),
     "filter": (
-        "filter <subcommand> [values...]\n"
+        "filter <subcommand> [values...]    (alias: f)\n"
         "\n"
         "  Subcommands:\n"
         "    filter band          <band...>     20m, 40m, 80m …\n"
@@ -189,12 +191,17 @@ _HELP: dict[str, str] = {
         "    'ON' → Belgium  : ON, OO, OP, OQ, OR, OS, OT\n"
         "    'DL' → Germany  : DA, DB, DC … DR\n"
         "\n"
-        "  Filters are saved and reloaded on next start."
+        "  Filters are saved and reloaded on next start.\n"
+        "\n"
+        "  Example using alias:\n"
+        "    f band 20m\n"
+        "    f mode FT8 CW"
     ),
     "search": (
         "search freq <kHz>           – spots within ±5 kHz in last 24 h\n"
         "search call <pattern>       – spots where DX or spotter matches pattern\n"
         "search prefix <prefix>      – all spots from the same DXCC entity as prefix\n"
+        "  (alias: /)\n"
         "\n"
         "  'search prefix' expands the prefix to ALL callsign prefixes for that\n"
         "  DXCC entity and matches the DX callsign (not the spotter).\n"
@@ -206,18 +213,17 @@ _HELP: dict[str, str] = {
         "  regardless of active filters.\n"
         "\n"
         "  Examples:\n"
-        "    search freq 14074\n"
-        "    search freq 7040.5\n"
-        "    search call G3SXW\n"
-        "    search call ON4\n"
-        "    search prefix VK\n"
-        "    search prefix GM"
+        "    search freq 14074       or   / freq 14074\n"
+        "    search call G3SXW       or   / call G3SXW\n"
+        "    search prefix VK        or   / prefix VK\n"
+        "    search prefix GM        or   / prefix GM"
     ),
     "callbook": (
         "callbook <callsign>                   – look up full details from QRZ/HamQTH\n"
         "callbook set hamqth <user> <pass>     – save HamQTH credentials\n"
         "callbook set qrz <user> <pass>        – save QRZ.com credentials\n"
         "callbook show                         – show which services are configured\n"
+        "  (alias: k)\n"
         "\n"
         "  Queries configured callbook service(s) and displays:\n"
         "    name, QTH, country, grid square, CQ/ITU zone,\n"
@@ -230,13 +236,13 @@ _HELP: dict[str, str] = {
         "  Credentials are stored in the local config file (plain text).\n"
         "\n"
         "  Examples:\n"
-        "    callbook G3SXW\n"
+        "    callbook G3SXW    or    k G3SXW\n"
         "    callbook set hamqth myuser mypassword\n"
         "    callbook set qrz AA7BQ myqrzpassword"
     ),
-    "log": "log\n\n  Show spot log statistics (total spots stored, file location).",
+    "log": "log    (alias: l)\n\n  Show spot log statistics (total spots stored, file location).",
     "worked": (
-        "worked <prefix...>  (alias: w)\n"
+        "worked <prefix...>    (alias: w)\n"
         "\n"
         "  Add a DXCC entity to the exclude list.\n"
         "  Resolves full entity prefix set:\n"
@@ -246,18 +252,59 @@ _HELP: dict[str, str] = {
         "  Use 'filter dx include <prefix>' to undo."
     ),
     "stream": (
-        "stream [start|stop]\n"
+        "stream [start|stop]    (alias: s)\n"
         "\n"
-        "  Toggle spot streaming (requires active connection)."
+        "  Toggle spot streaming (requires active connection).\n"
+        "  Examples:  stream   or   s   or   s stop"
     ),
-    "status": "status\n\n  Show connection, filter, and session statistics.",
-    "json":   "json [on|off]\n\n  Toggle NDJSON output (one JSON object per spot).",
-    "nodes":  "nodes\n\n  List all known DXCluster nodes.",
-    "bands":  "bands\n\n  Display the band plan with frequency ranges.",
-    "save":   "save\n\n  Save current settings to disk immediately.",
-    "config": "config\n\n  Show the path of the config file.",
+    "status": "status    (alias: t)\n\n  Show connection, filter, and session statistics.",
+    "json":   "json [on|off]    (alias: j)\n\n  Toggle NDJSON output (one JSON object per spot).",
+    "nodes":  "nodes    (alias: n)\n\n  List all known DXCluster nodes.",
+    "bands":  "bands    (alias: b)\n\n  Display the band plan with frequency ranges.",
+    "save":   "save    (alias: v)\n\n  Save current settings to disk immediately.",
+    "config": "config    (alias: g)\n\n  Show the path of the config file.",
+    "lookup": (
+        "lookup <callsign|prefix>    (alias: u)\n"
+        "\n"
+        "  Offline DXCC lookup: shows entity name, ITU prefix, CQ zone.\n"
+        "  Examples:  lookup VK3IO    or    u VK3IO"
+    ),
+    "disconnect": "disconnect    (alias: d)\n\n  Close the current cluster connection.",
+    "include": (
+        "include <prefix...>    (alias: i)\n"
+        "\n"
+        "  Show only spots whose DX callsign starts with one of the given prefixes.\n"
+        "  Example:  include VK ZL    or    i VK ZL"
+    ),
+    "exclude": (
+        "exclude <prefix...>    (alias: e)\n"
+        "\n"
+        "  Hide spots whose DX callsign starts with one of the given prefixes.\n"
+        "  Example:  exclude W K N    or    e W K N"
+    ),
     "quit":   "quit / exit / q\n\n  Stop streaming and exit.",
+    "help":   "help [command]    (alias: h)\n\n  Show the command list, or detailed help for a specific command.",
 }
+# Make all one-letter aliases resolve to the same help text as their full command.
+_HELP["c"] = _HELP["connect"]
+_HELP["d"] = _HELP["disconnect"]
+_HELP["n"] = _HELP["nodes"]
+_HELP["b"] = _HELP["bands"]
+_HELP["s"] = _HELP["stream"]
+_HELP["f"] = _HELP["filter"]
+_HELP["t"] = _HELP["status"]
+_HELP["j"] = _HELP["json"]
+_HELP["w"] = _HELP["worked"]
+_HELP["i"] = _HELP["include"]
+_HELP["e"] = _HELP["exclude"]
+_HELP["/"] = _HELP["search"]
+_HELP["l"] = _HELP["log"]
+_HELP["u"] = _HELP["lookup"]
+_HELP["k"] = _HELP["callbook"]
+_HELP["v"] = _HELP["save"]
+_HELP["g"] = _HELP["config"]
+_HELP["q"] = _HELP["quit"]
+_HELP["h"] = _HELP["help"]
 
 _MAX_OUTPUT_LINES = 2000  # maximum lines held in _output_lines before trimming
 # Rows consumed by the fixed UI elements below the output pane:
@@ -654,6 +701,7 @@ class DXClusterTUI:
         parts = line.split()
         cmd, args = parts[0].lower(), parts[1:]
         table = {
+            # full names
             "help":       self._cmd_help,
             "connect":    self._cmd_connect,
             "disconnect": self._cmd_disconnect,
@@ -664,7 +712,6 @@ class DXClusterTUI:
             "status":     self._cmd_status,
             "json":       self._cmd_json,
             "worked":     self._cmd_worked,
-            "w":          self._cmd_worked,
             "include":    self._cmd_include,
             "exclude":    self._cmd_exclude,
             "search":     self._cmd_search,
@@ -675,7 +722,26 @@ class DXClusterTUI:
             "config":     self._cmd_config,
             "quit":       self._cmd_quit,
             "exit":       self._cmd_quit,
-            "q":          self._cmd_quit,
+            # one-letter aliases
+            "h": self._cmd_help,
+            "c": self._cmd_connect,
+            "d": self._cmd_disconnect,
+            "n": self._cmd_nodes,
+            "b": self._cmd_bands,
+            "f": self._cmd_filter,
+            "s": self._cmd_stream,
+            "t": self._cmd_status,
+            "j": self._cmd_json,
+            "w": self._cmd_worked,
+            "i": self._cmd_include,
+            "e": self._cmd_exclude,
+            "/": self._cmd_search,
+            "l": self._cmd_log,
+            "u": self._cmd_lookup,
+            "k": self._cmd_callbook,
+            "v": self._cmd_save,
+            "g": self._cmd_config,
+            "q": self._cmd_quit,
         }
         handler = table.get(cmd)
         if handler:
@@ -697,26 +763,27 @@ class DXClusterTUI:
                 self._print(f"No help for '{topic}'.  Topics: {', '.join(_HELP)}")
             return
         self._print("")
-        self._print("Commands:")
-        self._print("  connect  <node|host> [call] [port]  – connect to a cluster")
-        self._print("  nodes                               – list known nodes")
-        self._print("  bands                               – show band plan")
-        self._print("  stream   [start|stop]               – toggle live spot stream")
-        self._print("  filter   band|mode|zone|spotter zone|dx|show|clear")
-        self._print("  worked   <prefix…>  (alias: w)      – add to worked/exclude list")
-        self._print("  include  <prefix…>                  – add to include whitelist")
-        self._print("  exclude  <prefix…>                  – add to exclude blacklist")
-        self._print("  search   freq|call|prefix <value>  – search 24-h spot log")
-        self._print("  log                                 – spot log statistics")
-        self._print("  status                              – connection & filter summary")
-        self._print("  json     [on|off]                   – toggle JSON output")
-        self._print("  lookup   <callsign|prefix>          – show country and CQ zone (local)")
-        self._print("  callbook <callsign>                 – full lookup via QRZ/HamQTH")
-        self._print("  save                                – save settings now")
-        self._print("  config                              – show config file path")
-        self._print("  quit                                – exit")
+        self._print("Commands (short alias shown in brackets):")
+        self._print("  [c] connect  <node|host> [call] [port]  – connect to a cluster")
+        self._print("  [d] disconnect                          – close connection")
+        self._print("  [n] nodes                               – list known nodes")
+        self._print("  [b] bands                               – show band plan")
+        self._print("  [s] stream   [start|stop]               – toggle live spot stream")
+        self._print("  [f] filter   band|mode|zone|clear|show  – spot filters")
+        self._print("  [w] worked   <prefix…>                  – add to worked/exclude list")
+        self._print("  [i] include  <prefix…>                  – show only these prefixes")
+        self._print("  [e] exclude  <prefix…>                  – hide these prefixes")
+        self._print("  [/] search   freq|call|prefix <value>   – search 24-h spot log")
+        self._print("  [l] log                                 – spot log statistics")
+        self._print("  [t] status                              – connection & filter summary")
+        self._print("  [j] json     [on|off]                   – toggle JSON output")
+        self._print("  [u] lookup   <callsign|prefix>          – offline DXCC lookup")
+        self._print("  [k] callbook <callsign>                 – full lookup via QRZ/HamQTH")
+        self._print("  [v] save                                – save settings now")
+        self._print("  [g] config                              – show config file path")
+        self._print("  [q] quit                                – exit")
         self._print("")
-        self._print("Type 'help <command>' for details.  Settings auto-save on every change.")
+        self._print("Type 'help <command>' for details, e.g. 'help f' or 'help filter'.")
         self._print("")
 
     async def _cmd_connect(self, args: list[str]) -> None:
