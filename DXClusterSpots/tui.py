@@ -70,8 +70,8 @@ from typing import Optional
 
 try:
     from prompt_toolkit import Application
+    from prompt_toolkit.application.current import get_app
     from prompt_toolkit.completion import WordCompleter
-    from prompt_toolkit.data_structures import Point
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout
@@ -326,7 +326,7 @@ _MAX_OUTPUT_LINES = 2000  # maximum lines held in _output_lines before trimming
 #   status bar (1) + separator (1) + input field (1) + 1 safety margin.
 # The +1 margin prevents the last spot line being clipped by the layout
 # engine when its row-count view differs slightly from the OS terminal size.
-_OUTPUT_PANE_OVERHEAD = 4
+_OUTPUT_PANE_OVERHEAD = 3   # status(1) + separator(1) + input(1)
 
 
 # ── Spot formatter ────────────────────────────────────────────────────────────
@@ -442,19 +442,36 @@ class DXClusterTUI:
         )
 
         # ── Output pane (FormattedTextControl) ───────────────────────────────
-        # We keep a render buffer of the last _RENDER_BUFFER lines and expose a
-        # get_cursor_position callable so prompt_toolkit's Window auto-scrolls
-        # to keep the cursor visible.  Putting the cursor at the last line
-        # (scroll_offset == 0) causes the Window to always show the newest spot
-        # at the bottom.  Moving the cursor up (scroll_offset > 0) scrolls the
-        # view back in time.  This avoids manually guessing the window height.
-        _RENDER_BUFFER = 500
-        _cursor_line = [0]  # mutable cell shared between the two closures
+        # get_output_text() is called by prompt_toolkit on every redraw,
+        # including after a terminal resize.  We query the live terminal height
+        # inside the callable (via get_app()) so the visible-line count is
+        # always exact for the current window size — no cursor tricks needed,
+        # no stale cached heights.
+        #
+        # WHY not use get_cursor_position?
+        #   The cursor-pin approach only guarantees the cursor is *somewhere*
+        #   in the visible range, not pinned to the bottom.  After the window
+        #   grows, prompt_toolkit sees the cursor is still visible and leaves
+        #   vertical_scroll unchanged, so new spots drift away from the bottom.
+        #   Returning exactly the right number of lines avoids the problem
+        #   entirely: vertical_scroll stays at 0 and everything fits perfectly.
 
         def get_output_text():
-            """Return the last _RENDER_BUFFER lines as formatted text."""
-            lines = self._output_lines[-_RENDER_BUFFER:]
-            _cursor_line[0] = max(0, len(lines) - 1)
+            """Return exactly as many lines as the output pane can show."""
+            try:
+                rows = get_app().output.get_size().rows
+            except Exception:
+                rows = 24
+            visible = max(1, rows - _OUTPUT_PANE_OVERHEAD)
+            total = len(self._output_lines)
+
+            if self._scroll_offset > 0:
+                end   = max(0, total - self._scroll_offset)
+                start = max(0, end - visible)
+                lines = self._output_lines[start:end]
+            else:
+                lines = self._output_lines[-visible:]
+
             result = []
             for i, parts in enumerate(lines):
                 if i > 0:
@@ -462,22 +479,8 @@ class DXClusterTUI:
                 result.extend(parts)
             return result
 
-        def get_cursor_position():
-            """Tell prompt_toolkit where the 'cursor' is so the Window scrolls."""
-            total = len(self._output_lines[-_RENDER_BUFFER:])
-            if total == 0:
-                return Point(x=0, y=0)
-            if self._scroll_offset > 0:
-                y = max(0, total - 1 - self._scroll_offset)
-            else:
-                y = total - 1  # cursor at last line → auto-scroll to bottom
-            return Point(x=0, y=y)
-
         output_window = Window(
-            content=FormattedTextControl(
-                get_output_text,
-                get_cursor_position=get_cursor_position,
-            ),
+            content=FormattedTextControl(get_output_text),
             wrap_lines=False,
             dont_extend_height=False,
         )
