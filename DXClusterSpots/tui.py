@@ -395,6 +395,10 @@ class DXClusterTUI:
         self._app: Optional[Application] = None
         self._log: SpotLog = SpotLog(log_path())
 
+        # Display filter applied in the stream loop (separate from the feed so
+        # the feed delivers every spot to the log regardless of active filters).
+        self._display_filter = build_filter_from_config(self._cfg.filters)
+
         # Each entry: list of (style, text) tuples for one output line
         self._output_lines: list[list] = []
 
@@ -1389,15 +1393,15 @@ class DXClusterTUI:
     # ── Stream management ─────────────────────────────────────────────────────
 
     def _apply_filter_to_feed(self) -> None:
-        """Rebuild the SpotFilter from the current config and push it to the feed.
+        """Rebuild the display filter from the current config.
 
-        Called whenever a filter setting changes while a stream is running.
-        build_filter_from_config() returns None if no filters are active,
-        which SpotFeed interprets as "accept all spots" — slightly more
-        efficient than an empty SpotFilter with zero predicates.
+        The feed itself is unfiltered — every spot from the cluster is logged
+        to the 24-hour rolling log regardless of active filters.  This method
+        updates only self._display_filter, which the stream loop checks before
+        rendering a spot to the output pane.  That way search commands always
+        have access to the full 24-hour history even after filter changes.
         """
-        if self._feed:
-            self._feed.spot_filter = build_filter_from_config(self._cfg.filters)
+        self._display_filter = build_filter_from_config(self._cfg.filters)
 
     async def _start_stream(self) -> None:
         """Create a fresh SpotFeed and launch the background streaming task.
@@ -1418,7 +1422,8 @@ class DXClusterTUI:
             host=c.host,
             port=c.port,
             callsign=c.callsign,
-            spot_filter=build_filter_from_config(self._cfg.filters),
+            # No filter here — ALL spots reach the log and search commands.
+            # Display filtering is applied in the stream loop via _display_filter.
             reconnect=True,  # auto-reconnect on connection loss
         )
         self._streaming = True
@@ -1484,12 +1489,13 @@ class DXClusterTUI:
         try:
             async for spot in self._feed.spots():
                 self._spot_count += 1
-                # Log ALL spots regardless of active display filters.
-                # The SpotFeed applies filters before yielding, so spots that
-                # were filtered out by the user never reach this loop.
-                # However, we still log everything that passes the filter —
-                # the filter is applied by SpotFeed, not here.
+                # Log ALL spots unconditionally — the feed is unfiltered so
+                # that search commands always have the full 24-hour history
+                # regardless of what display filters are currently active.
                 self._log.append(spot)
+                # Apply the display filter here, not in SpotFeed.
+                if self._display_filter and not self._display_filter(spot):
+                    continue
                 if self._json_mode:
                     self._write_line([("", spot.to_json())])
                 else:
