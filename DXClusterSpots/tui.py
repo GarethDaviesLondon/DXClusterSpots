@@ -27,10 +27,8 @@ asyncio event loop internally and redraws the layout on every invalidation.
 Output pane (FormattedTextControl)
     Spots are stored in ``self._output_lines`` as lists of (style, text) tuples
     (the prompt_toolkit "formatted text" format).  A ``FormattedTextControl``
-    calls ``get_output_text()`` on every redraw and returns the last N visible
-    lines based on the current terminal height.  Auto-scrolling is achieved
-    by always showing the *tail* of ``self._output_lines`` rather than
-    maintaining a scroll offset.
+    calls ``get_output_text()`` on every redraw and uses ``get_cursor_position``
+    to let prompt_toolkit scroll the window so the newest spot is always visible.
 
 Status bar (FormattedTextControl)
     ``get_status_text()`` is called on every redraw and reads live from
@@ -51,6 +49,18 @@ Async integration
     Commands from the input pane are dispatched via
     ``asyncio.ensure_future(self._dispatch(text))`` from the synchronous
     ``accept_handler``.
+
+Spot logging vs display filtering
+    ``SpotFeed`` is intentionally unfiltered: every spot received from the
+    cluster is appended to the 24-hour rolling log (``SpotLog``) and to the
+    on-disk NDJSON file regardless of any active display filters.  The display
+    filter (``self._display_filter``) is applied only in ``_stream_loop`` to
+    decide whether a spot is rendered to the output pane.
+
+    This separation means that search commands (``search freq``, ``search
+    call``, ``search prefix``) always operate on the complete 24-hour history
+    even if the user has been running with a narrow filter.  Changing a filter
+    mid-session never discards historical spot data.
 """
 
 import asyncio
@@ -1471,14 +1481,18 @@ class DXClusterTUI:
         This coroutine runs as a concurrent task alongside the prompt_toolkit
         Application event loop.  For each spot received:
           1. Increment the spot counter (shown in the status bar).
-          2. Log the spot to the 24-hour rolling log (BEFORE any display filter
-             so that search results include filtered-out spots).
-          3. Format and display the spot (or its JSON representation in JSON mode).
+          2. Log the spot to the 24-hour rolling log unconditionally — before
+             any display filter — so that search results always cover the full
+             24-hour history regardless of what filters are active.
+          3. Check self._display_filter.  If the spot does not pass, skip
+             rendering and move on to the next spot.
+          4. Render the spot to the output pane (formatted columns or JSON).
 
-        The spot is logged regardless of display filters because the user may
-        want to search for a spot they had previously filtered out.  For
-        example, if the user filtered to 20m only, a 40m spot would be hidden
-        from the live stream but would still appear in 'search freq 7040'.
+        The deliberate split between logging (step 2) and display (steps 3–4)
+        means the user can freely change filters mid-session without losing
+        historical data.  For example, with a 20m-only filter active, a 40m
+        spot is hidden from the live stream but remains searchable via
+        'search freq 7040' or 'search prefix VK'.
 
         Exception handling:
           asyncio.CancelledError – clean stop via _stop_stream() or app exit.
