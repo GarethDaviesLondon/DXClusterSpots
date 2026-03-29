@@ -61,6 +61,7 @@ from typing import Optional
 try:
     from prompt_toolkit import Application
     from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.data_structures import Point
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout
@@ -375,47 +376,19 @@ class DXClusterTUI:
         )
 
         # ── Output pane (FormattedTextControl) ───────────────────────────────
+        # We keep a render buffer of the last _RENDER_BUFFER lines and expose a
+        # get_cursor_position callable so prompt_toolkit's Window auto-scrolls
+        # to keep the cursor visible.  Putting the cursor at the last line
+        # (scroll_offset == 0) causes the Window to always show the newest spot
+        # at the bottom.  Moving the cursor up (scroll_offset > 0) scrolls the
+        # view back in time.  This avoids manually guessing the window height.
+        _RENDER_BUFFER = 500
+        _cursor_line = [0]  # mutable cell shared between the two closures
+
         def get_output_text():
-            """Produce the formatted text for the output pane.
-
-            Called by prompt_toolkit on every redraw.  We return only the
-            last N lines (where N = terminal height minus fixed overhead rows)
-            so the pane auto-scrolls to the bottom without maintaining an
-            explicit scroll offset.
-
-            WHY shutil.get_terminal_size() instead of using the Application's
-            own output.get_size()?
-              get_terminal_size() is simpler and available synchronously.  The
-              Application's output object requires going through the event loop,
-              which is overkill for this purpose.  In practice both return the
-              same value.
-
-            WHY insert "\n" between lines rather than in each parts list?
-              FormattedTextControl concatenates all the (style, text) pairs
-              into a single run of styled text.  Newlines must be inserted
-              explicitly between lines; they are not added automatically.
-              We add the newline separator between entries (not after the last
-              one) so there is no trailing blank line at the bottom of the pane.
-            """
-            try:
-                # Use the Application's own output object so the row count
-                # matches what the prompt_toolkit layout engine uses — avoids
-                # a 1-2 line discrepancy that can occur with shutil.get_terminal_size().
-                rows = self._app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD
-            except Exception:
-                rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
-            visible = max(5, rows)
-            total = len(self._output_lines)
-
-            if self._scroll_offset > 0:
-                # Scrolled up: show a window ending scroll_offset lines before the end.
-                end = max(0, total - self._scroll_offset)
-                start = max(0, end - visible)
-                lines = self._output_lines[start:end]
-            else:
-                # Auto-scroll: always show the most recent lines.
-                lines = self._output_lines[-visible:]
-
+            """Return the last _RENDER_BUFFER lines as formatted text."""
+            lines = self._output_lines[-_RENDER_BUFFER:]
+            _cursor_line[0] = max(0, len(lines) - 1)
             result = []
             for i, parts in enumerate(lines):
                 if i > 0:
@@ -423,8 +396,22 @@ class DXClusterTUI:
                 result.extend(parts)
             return result
 
+        def get_cursor_position():
+            """Tell prompt_toolkit where the 'cursor' is so the Window scrolls."""
+            total = len(self._output_lines[-_RENDER_BUFFER:])
+            if total == 0:
+                return Point(x=0, y=0)
+            if self._scroll_offset > 0:
+                y = max(0, total - 1 - self._scroll_offset)
+            else:
+                y = total - 1  # cursor at last line → auto-scroll to bottom
+            return Point(x=0, y=y)
+
         output_window = Window(
-            content=FormattedTextControl(get_output_text),
+            content=FormattedTextControl(
+                get_output_text,
+                get_cursor_position=get_cursor_position,
+            ),
             wrap_lines=False,
             dont_extend_height=False,
         )
@@ -719,6 +706,8 @@ class DXClusterTUI:
         self._print("  worked   <prefix…>  (alias: w)      – add to worked/exclude list")
         self._print("  include  <prefix…>                  – add to include whitelist")
         self._print("  exclude  <prefix…>                  – add to exclude blacklist")
+        self._print("  search   freq|call|prefix <value>  – search 24-h spot log")
+        self._print("  log                                 – spot log statistics")
         self._print("  status                              – connection & filter summary")
         self._print("  json     [on|off]                   – toggle JSON output")
         self._print("  lookup   <callsign|prefix>          – show country and CQ zone (local)")
