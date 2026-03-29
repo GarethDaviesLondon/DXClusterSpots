@@ -164,23 +164,23 @@ _HELP: dict[str, str] = {
     "filter": (
         "filter <subcommand> [values...]    (alias: f)\n"
         "\n"
-        "  Subcommands:\n"
-        "    filter band          <band...>     20m, 40m, 80m …\n"
-        "    filter mode          <mode...>     CW, SSB, FT8, RTTY, DIGI …\n"
-        "    filter zone          add <zone...> DX station: add CQ zone(s) to allow list\n"
-        "    filter zone          remove <n...> DX station: remove CQ zone(s)\n"
-        "    filter zone          open          DX station: accept all zones (default)\n"
-        "    filter zone          close         DX station: reject all zones\n"
-        "    filter zone          show          DX station: show zone filter\n"
-        "    filter spotter zone  add <zone...> Spotter: add CQ zone(s) to allow list\n"
-        "    filter spotter zone  remove <n...> Spotter: remove CQ zone(s)\n"
-        "    filter spotter zone  open          Spotter: accept all zones (default)\n"
-        "    filter spotter zone  close         Spotter: reject all zones\n"
-        "    filter spotter zone  show          Spotter: show zone filter\n"
-        "    filter dx include <prefix...>      show ONLY DX from these DXCC entities\n"
-        "    filter dx exclude <prefix...>      hide DX from these DXCC entities\n"
-        "    filter show                      display all active filters\n"
-        "    filter clear                     remove all filters\n"
+        "  Subcommand short forms in parentheses:\n"
+        "    filter band (b)          <band...>     20m, 40m, 80m …\n"
+        "    filter mode (m)          <mode...>     CW, SSB, FT8, RTTY, DIGI …\n"
+        "    filter zone (z)          add (a) <zone...>  DX station: add CQ zone(s)\n"
+        "    filter zone (z)          remove (r) <n...>  DX station: remove CQ zone(s)\n"
+        "    filter zone (z)          open (o)           DX station: accept all zones\n"
+        "    filter zone (z)          close (x)          DX station: reject all zones\n"
+        "    filter zone (z)          show (s)           DX station: show zone filter\n"
+        "    filter spotter zone      add (a) <zone...>  Spotter: add CQ zone(s)\n"
+        "    filter spotter zone      remove (r) <n...>  Spotter: remove CQ zone(s)\n"
+        "    filter spotter zone      open (o)           Spotter: accept all zones\n"
+        "    filter spotter zone      close (x)          Spotter: reject all zones\n"
+        "    filter spotter zone      show (s)           Spotter: show zone filter\n"
+        "    filter dx (d) include (i) <prefix...>       show ONLY DX from these entities\n"
+        "    filter dx (d) exclude (e) <prefix...>       hide DX from these entities\n"
+        "    filter show (s)                             display all active filters\n"
+        "    filter clear (c)                            remove all filters\n"
         "\n"
         "  CQ zones: 1=Alaska  3-5=USA  6=Mexico  7-9=Caribbean/SA\n"
         "    14=W.Europe  15=E.Europe  16=Russia/EU  20=Balkans/Turkey\n"
@@ -193,15 +193,19 @@ _HELP: dict[str, str] = {
         "\n"
         "  Filters are saved and reloaded on next start.\n"
         "\n"
-        "  Example using alias:\n"
-        "    f band 20m\n"
-        "    f mode FT8 CW"
+        "  Examples using short forms:\n"
+        "    f b 20m           (filter band 20m)\n"
+        "    f m FT8 CW        (filter mode FT8 CW)\n"
+        "    f d i VK ZL       (filter dx include VK ZL)\n"
+        "    f z a 14 15       (filter zone add 14 15)\n"
+        "    f s               (filter show)\n"
+        "    f c               (filter clear)"
     ),
     "search": (
-        "search freq <kHz>           – spots within ±5 kHz in last 24 h\n"
-        "search call <pattern>       – spots where DX or spotter matches pattern\n"
-        "search prefix <prefix>      – all spots from the same DXCC entity as prefix\n"
-        "  (alias: /)\n"
+        "search freq (f) <kHz>           – spots within ±5 kHz in last 24 h\n"
+        "search call (c) <pattern>       – spots where DX callsign matches pattern\n"
+        "search prefix (p) <prefix>      – all spots from the same DXCC entity\n"
+        "  (command alias: /)\n"
         "\n"
         "  'search prefix' expands the prefix to ALL callsign prefixes for that\n"
         "  DXCC entity and matches the DX callsign (not the spotter).\n"
@@ -212,18 +216,18 @@ _HELP: dict[str, str] = {
         "  Results are ordered chronologically.  All 24-h spots are logged\n"
         "  regardless of active filters.\n"
         "\n"
-        "  Examples:\n"
-        "    search freq 14074       or   / freq 14074\n"
-        "    search call G3SXW       or   / call G3SXW\n"
-        "    search prefix VK        or   / prefix VK\n"
-        "    search prefix GM        or   / prefix GM"
+        "  Examples using short forms:\n"
+        "    / f 14074          (search freq 14074)\n"
+        "    / c G3SXW          (search call G3SXW)\n"
+        "    / p VK             (search prefix VK)\n"
+        "    / p GM             (search prefix GM)"
     ),
     "callbook": (
-        "callbook <callsign>                   – look up full details from QRZ/HamQTH\n"
-        "callbook set hamqth <user> <pass>     – save HamQTH credentials\n"
-        "callbook set qrz <user> <pass>        – save QRZ.com credentials\n"
-        "callbook show                         – show which services are configured\n"
-        "  (alias: k)\n"
+        "callbook <callsign>                        – full details from QRZ/HamQTH\n"
+        "callbook set (s) hamqth <user> <pass>      – save HamQTH credentials\n"
+        "callbook set (s) qrz    <user> <pass>      – save QRZ.com credentials\n"
+        "callbook show (sh)                         – show which services are configured\n"
+        "  (command alias: k)\n"
         "\n"
         "  Queries configured callbook service(s) and displays:\n"
         "    name, QTH, country, grid square, CQ/ITU zone,\n"
@@ -235,10 +239,11 @@ _HELP: dict[str, str] = {
         "\n"
         "  Credentials are stored in the local config file (plain text).\n"
         "\n"
-        "  Examples:\n"
-        "    callbook G3SXW    or    k G3SXW\n"
-        "    callbook set hamqth myuser mypassword\n"
-        "    callbook set qrz AA7BQ myqrzpassword"
+        "  Examples using short forms:\n"
+        "    k G3SXW\n"
+        "    k s hamqth myuser mypassword\n"
+        "    k s qrz AA7BQ mypassword\n"
+        "    k sh"
     ),
     "log": "log    (alias: l)\n\n  Show spot log statistics (total spots stored, file location).",
     "worked": (
@@ -857,16 +862,18 @@ class DXClusterTUI:
         if not args:
             self._print(
                 "Usage: filter <band|mode|dx|show|clear> [values…]\n"
-                "  filter band 20m 40m\n"
-                "  filter mode CW FT8 SSB\n"
-                "  filter dx include VK ZL\n"
-                "  filter dx exclude G ON DL\n"
-                "  filter show\n"
-                "  filter clear"
+                "  f b 20m 40m           – band filter (b=band)\n"
+                "  f m CW FT8 SSB        – mode filter (m=mode)\n"
+                "  f d i VK ZL           – dx include   (d=dx, i=include)\n"
+                "  f d e G ON DL         – dx exclude   (d=dx, e=exclude)\n"
+                "  f z a 14 15           – zone add     (z=zone, a=add)\n"
+                "  f s                   – show filters (s=show)\n"
+                "  f c                   – clear all    (c=clear)"
             )
             return
 
-        sub    = args[0].lower()
+        _FILTER_SUBS = {"b": "band", "m": "mode", "z": "zone", "d": "dx", "s": "show", "c": "clear"}
+        sub    = _FILTER_SUBS.get(args[0].lower(), args[0].lower())
         values = args[1:]
 
         if sub == "show":
@@ -918,9 +925,10 @@ class DXClusterTUI:
 
         elif sub == "dx":
             if not values:
-                self._print("Usage: filter dx include|exclude <prefix…>")
+                self._print("Usage: filter dx include|exclude <prefix…>  (i=include, e=exclude)")
                 return
-            direction = values[0].lower()
+            _DX_DIRS = {"i": "include", "e": "exclude"}
+            direction = _DX_DIRS.get(values[0].lower(), values[0].lower())
             prefixes  = values[1:]
             if not prefixes:
                 self._print(f"Usage: filter dx {direction} <prefix…>")
@@ -930,13 +938,13 @@ class DXClusterTUI:
             elif direction == "exclude":
                 await self._do_exclude(prefixes)
             else:
-                self._print("Usage: filter dx include|exclude <prefix…>")
+                self._print("Usage: filter dx include|exclude <prefix…>  (i=include, e=exclude)")
             return  # include/exclude already call save and apply
 
         else:
             self._print(
                 f"Unknown filter sub-command '{sub}'.\n"
-                "  Use: band, mode, zone, dx include/exclude, show, clear"
+                "  Use: band (b), mode (m), zone (z), dx (d) include/exclude, show (s), clear (c)"
             )
             return
 
@@ -969,15 +977,16 @@ class DXClusterTUI:
         if not args:
             self._print(
                 f"Usage: {cmd_pfx} <add|remove|open|close|show> [zone...]\n"
-                f"  {cmd_pfx} open          – accept all zones (default)\n"
-                f"  {cmd_pfx} close         – reject all zones\n"
-                f"  {cmd_pfx} add 14 15     – add zones to allow list\n"
-                f"  {cmd_pfx} remove 14     – remove zone from allow list\n"
-                f"  {cmd_pfx} show          – display current zone filter"
+                f"  {cmd_pfx} o             – open: accept all zones (o=open)\n"
+                f"  {cmd_pfx} x             – close: reject all zones (x=close)\n"
+                f"  {cmd_pfx} a 14 15       – add zones to allow list (a=add)\n"
+                f"  {cmd_pfx} r 14          – remove zone from allow list (r=remove)\n"
+                f"  {cmd_pfx} s             – show current zone filter (s=show)"
             )
             return
 
-        sub = args[0].lower()
+        _ZONE_SUBS = {"a": "add", "r": "remove", "o": "open", "x": "close", "s": "show"}
+        sub = _ZONE_SUBS.get(args[0].lower(), args[0].lower())
 
         def get_zones():
             return self._cfg.filters.spotter_cq_zones if is_spotter else self._cfg.filters.cq_zones
@@ -1059,14 +1068,15 @@ class DXClusterTUI:
         if len(args) < 2:
             self._print(
                 "Usage:\n"
-                "  search freq <kHz>       – spots within ±5 kHz in last 24 h\n"
-                "  search call <pattern>   – spots matching callsign pattern\n"
-                "  search prefix <prefix>  – all spots from the same DXCC entity\n"
-                "  search freq 14074 | search call G3SXW | search prefix VK"
+                "  search freq <kHz>       (/ f <kHz>)    – spots within ±5 kHz in last 24 h\n"
+                "  search call <pattern>   (/ c <call>)   – spots matching callsign pattern\n"
+                "  search prefix <prefix>  (/ p <prefix>) – all spots from the same DXCC entity\n"
+                "Examples:  / f 14074   / c G3SXW   / p VK"
             )
             return
 
-        sub = args[0].lower()
+        _SEARCH_SUBS = {"f": "freq", "c": "call", "p": "prefix"}
+        sub = _SEARCH_SUBS.get(args[0].lower(), args[0].lower())
 
         if sub == "freq":
             try:
@@ -1134,7 +1144,7 @@ class DXClusterTUI:
             self._print("─" * 78)
 
         else:
-            self._print(f"Unknown search type '{sub}'.  Use: freq, call, prefix")
+            self._print(f"Unknown search type '{sub}'.  Use: freq (f), call (c), prefix (p)")
 
     async def _cmd_log(self, args: list[str]) -> None:
         self._print(f"Spot log: {self._log.size()} spots stored (last 24 h)")
@@ -1162,10 +1172,11 @@ class DXClusterTUI:
     async def _cmd_callbook(self, args: list[str]) -> None:
         """callbook <callsign> | callbook set <service> <user> <pass> | callbook show"""
         if not args:
-            self._print("Usage: callbook <callsign>  |  callbook set hamqth/qrz <user> <pass>  |  callbook show")
+            self._print("Usage: callbook <callsign>  |  k set hamqth/qrz <user> <pass>  |  k sh")
             return
 
-        sub = args[0].lower()
+        _CB_SUBS = {"s": "set", "sh": "show"}
+        sub = _CB_SUBS.get(args[0].lower(), args[0].lower())
 
         # ── callbook show ──────────────────────────────────────────────────────
         if sub == "show":
