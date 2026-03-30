@@ -124,10 +124,31 @@ class FilterConfig:
 
 
 @dataclass
+class CallbookConfig:
+    """Credentials for external callbook lookup services.
+
+    Both HamQTH and QRZ.com use a username/password authentication flow
+    that exchanges credentials for a session key (see callbook.py).
+    Storing the credentials here lets the TUI authenticate without prompting
+    on every lookup.
+
+    Security note: credentials are stored in plain text in the config JSON
+    file.  The file lives in the user's private config directory
+    (%APPDATA%\\DXClusterSpots\\ or ~/.config/DXClusterSpots/) which is only
+    readable by the owning user on properly configured systems.
+    """
+    hamqth_user: str = ""   # HamQTH account username (free registration)
+    hamqth_pass: str = ""   # HamQTH account password
+    qrz_user: str = ""      # QRZ.com account callsign / username
+    qrz_pass: str = ""      # QRZ.com account password (XML sub. required)
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration."""
     connection: ConnectionConfig = field(default_factory=ConnectionConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
+    callbook: CallbookConfig = field(default_factory=CallbookConfig)
     json_mode: bool = False
     auto_stream: bool = True   # reconnect and start streaming on launch
 
@@ -139,6 +160,7 @@ class AppConfig:
         return {
             "connection": asdict(self.connection),
             "filters": asdict(self.filters),
+            "callbook": asdict(self.callbook),
             "json_mode": self.json_mode,
             "auto_stream": self.auto_stream,
         }
@@ -147,6 +169,7 @@ class AppConfig:
     def from_dict(cls, d: dict) -> "AppConfig":
         conn_d = d.get("connection", {})
         filt_d = d.get("filters", {})
+        cb_d   = d.get("callbook", {})
         return cls(
             connection=ConnectionConfig(
                 node=conn_d.get("node", ""),
@@ -161,6 +184,12 @@ class AppConfig:
                 exclude_prefixes=filt_d.get("exclude_prefixes", []),
                 cq_zones=filt_d.get("cq_zones", None),
                 spotter_cq_zones=filt_d.get("spotter_cq_zones", None),
+            ),
+            callbook=CallbookConfig(
+                hamqth_user=cb_d.get("hamqth_user", ""),
+                hamqth_pass=cb_d.get("hamqth_pass", ""),
+                qrz_user=cb_d.get("qrz_user", ""),
+                qrz_pass=cb_d.get("qrz_pass", ""),
             ),
             json_mode=d.get("json_mode", False),
             auto_stream=d.get("auto_stream", True),

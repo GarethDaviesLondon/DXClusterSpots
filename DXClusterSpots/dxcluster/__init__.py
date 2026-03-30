@@ -7,8 +7,9 @@ Public API::
 """
 
 from .bands import BAND_PLAN, band_to_range, frequency_to_band
+from .callbook import CallbookEntry, lookup_hamqth, lookup_qrz
 from .client import DXClusterClient
-from .config import AppConfig, FilterConfig, load_config, save_config
+from .config import AppConfig, CallbookConfig, FilterConfig, load_config, save_config
 from .dxcc import all_prefixes_for, callsign_prefix, cq_zone_for, describe_entity, resolve_entity
 from .feed import CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed
 from .filters import SpotFilter, build_filter_from_config
@@ -22,6 +23,9 @@ __all__ = [
     "SpotFeed",
     "SpotFilter",
     "SpotLog",
+    "CallbookEntry",
+    "lookup_hamqth",
+    "lookup_qrz",
     "build_filter_from_config",
     "parse_spot",
     "parse_mode",
@@ -31,6 +35,7 @@ __all__ = [
     "frequency_to_band",
     "band_to_range",
     "AppConfig",
+    "CallbookConfig",
     "FilterConfig",
     "load_config",
     "save_config",

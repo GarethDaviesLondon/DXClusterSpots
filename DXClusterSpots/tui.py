@@ -27,10 +27,8 @@ asyncio event loop internally and redraws the layout on every invalidation.
 Output pane (FormattedTextControl)
     Spots are stored in ``self._output_lines`` as lists of (style, text) tuples
     (the prompt_toolkit "formatted text" format).  A ``FormattedTextControl``
-    calls ``get_output_text()`` on every redraw and returns the last N visible
-    lines based on the current terminal height.  Auto-scrolling is achieved
-    by always showing the *tail* of ``self._output_lines`` rather than
-    maintaining a scroll offset.
+    calls ``get_output_text()`` on every redraw and uses ``get_cursor_position``
+    to let prompt_toolkit scroll the window so the newest spot is always visible.
 
 Status bar (FormattedTextControl)
     ``get_status_text()`` is called on every redraw and reads live from
@@ -51,6 +49,18 @@ Async integration
     Commands from the input pane are dispatched via
     ``asyncio.ensure_future(self._dispatch(text))`` from the synchronous
     ``accept_handler``.
+
+Spot logging vs display filtering
+    ``SpotFeed`` is intentionally unfiltered: every spot received from the
+    cluster is appended to the 24-hour rolling log (``SpotLog``) and to the
+    on-disk NDJSON file regardless of any active display filters.  The display
+    filter (``self._display_filter``) is applied only in ``_stream_loop`` to
+    decide whether a spot is rendered to the output pane.
+
+    This separation means that search commands (``search freq``, ``search
+    call``, ``search prefix``) always operate on the complete 24-hour history
+    even if the user has been running with a narrow filter.  Changing a filter
+    mid-session never discards historical spot data.
 """
 
 import asyncio
@@ -60,6 +70,7 @@ from typing import Optional
 
 try:
     from prompt_toolkit import Application
+    from prompt_toolkit.application.current import get_app
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
@@ -73,6 +84,7 @@ except ImportError:
     HAS_PROMPT_TOOLKIT = False
 
 from dxcluster import BAND_PLAN, CLUSTER_DESCRIPTIONS, KNOWN_CLUSTERS, SpotFeed, SpotFilter, SpotLog
+from dxcluster.callbook import lookup_hamqth, lookup_qrz
 from dxcluster.config import (
     AppConfig, FilterConfig, load_config, save_config,
     config_path as config_file_path, history_path, log_path,
@@ -139,13 +151,15 @@ _STYLE = Style.from_dict({
 
 _ALL_COMMANDS = [
     "help", "connect", "disconnect", "nodes", "bands",
-    "filter", "stream", "status", "json", "worked", "w",
-    "include", "exclude", "search", "log", "lookup", "save", "config", "quit", "exit", "q",
+    "filter", "stream", "status", "json", "worked",
+    "include", "exclude", "search", "log", "lookup", "callbook", "save", "config", "quit", "exit",
+    # one-letter aliases
+    "h", "c", "d", "n", "b", "s", "f", "w", "i", "e", "/", "l", "t", "j", "u", "k", "v", "g", "q",
 ]
 
 _HELP: dict[str, str] = {
     "connect": (
-        "connect <node|hostname> [callsign] [port]\n"
+        "connect <node|hostname> [callsign] [port]    (alias: c)\n"
         "\n"
         "  Connect to a DXCluster node.  Settings are saved automatically.\n"
         "    node      – known node name (see 'nodes')\n"
@@ -154,29 +168,29 @@ _HELP: dict[str, str] = {
         "\n"
         "  Examples:\n"
         "    connect g6nhu ON4XXX\n"
-        "    connect on0nol ON4XXX\n"
+        "    c g6nhu ON4XXX\n"
         "    connect dxspider.co.uk ON4XXX 7300"
     ),
     "filter": (
-        "filter <subcommand> [values...]\n"
+        "filter <subcommand> [values...]    (alias: f)\n"
         "\n"
-        "  Subcommands:\n"
-        "    filter band          <band...>     20m, 40m, 80m …\n"
-        "    filter mode          <mode...>     CW, SSB, FT8, RTTY, DIGI …\n"
-        "    filter zone          add <zone...> DX station: add CQ zone(s) to allow list\n"
-        "    filter zone          remove <n...> DX station: remove CQ zone(s)\n"
-        "    filter zone          open          DX station: accept all zones (default)\n"
-        "    filter zone          close         DX station: reject all zones\n"
-        "    filter zone          show          DX station: show zone filter\n"
-        "    filter spotter zone  add <zone...> Spotter: add CQ zone(s) to allow list\n"
-        "    filter spotter zone  remove <n...> Spotter: remove CQ zone(s)\n"
-        "    filter spotter zone  open          Spotter: accept all zones (default)\n"
-        "    filter spotter zone  close         Spotter: reject all zones\n"
-        "    filter spotter zone  show          Spotter: show zone filter\n"
-        "    filter dx include <prefix...>      show ONLY DX from these DXCC entities\n"
-        "    filter dx exclude <prefix...>      hide DX from these DXCC entities\n"
-        "    filter show                      display all active filters\n"
-        "    filter clear                     remove all filters\n"
+        "  Subcommand short forms in parentheses:\n"
+        "    filter band (b)          <band...>     20m, 40m, 80m …\n"
+        "    filter mode (m)          <mode...>     CW, SSB, FT8, RTTY, DIGI …\n"
+        "    filter zone (z)          add (a) <zone...>  DX station: add CQ zone(s)\n"
+        "    filter zone (z)          remove (r) <n...>  DX station: remove CQ zone(s)\n"
+        "    filter zone (z)          open (o)           DX station: accept all zones\n"
+        "    filter zone (z)          close (x)          DX station: reject all zones\n"
+        "    filter zone (z)          show (s)           DX station: show zone filter\n"
+        "    filter spotter zone      add (a) <zone...>  Spotter: add CQ zone(s)\n"
+        "    filter spotter zone      remove (r) <n...>  Spotter: remove CQ zone(s)\n"
+        "    filter spotter zone      open (o)           Spotter: accept all zones\n"
+        "    filter spotter zone      close (x)          Spotter: reject all zones\n"
+        "    filter spotter zone      show (s)           Spotter: show zone filter\n"
+        "    filter dx (d) include (i) <prefix...>       show ONLY DX from these entities\n"
+        "    filter dx (d) exclude (e) <prefix...>       hide DX from these entities\n"
+        "    filter show (s)                             display all active filters\n"
+        "    filter clear (c)                            remove all filters\n"
         "\n"
         "  CQ zones: 1=Alaska  3-5=USA  6=Mexico  7-9=Caribbean/SA\n"
         "    14=W.Europe  15=E.Europe  16=Russia/EU  20=Balkans/Turkey\n"
@@ -187,25 +201,63 @@ _HELP: dict[str, str] = {
         "    'ON' → Belgium  : ON, OO, OP, OQ, OR, OS, OT\n"
         "    'DL' → Germany  : DA, DB, DC … DR\n"
         "\n"
-        "  Filters are saved and reloaded on next start."
+        "  Filters are saved and reloaded on next start.\n"
+        "\n"
+        "  Examples using short forms:\n"
+        "    f b 20m           (filter band 20m)\n"
+        "    f m FT8 CW        (filter mode FT8 CW)\n"
+        "    f d i VK ZL       (filter dx include VK ZL)\n"
+        "    f z a 14 15       (filter zone add 14 15)\n"
+        "    f s               (filter show)\n"
+        "    f c               (filter clear)"
     ),
     "search": (
-        "search freq <kHz>           – spots within ±5 kHz in last 24 h\n"
-        "search call <pattern>       – spots where DX or spotter matches pattern\n"
+        "search freq (f) <kHz>           – spots within ±5 kHz in last 24 h\n"
+        "search call (c) <pattern>       – spots where DX callsign matches pattern\n"
+        "search prefix (p) <prefix>      – all spots from the same DXCC entity\n"
+        "  (command alias: /)\n"
         "\n"
-        "  Results are ordered chronologically.  All spots from the last 24\n"
-        "  hours are logged regardless of active filters, so you can search\n"
-        "  for spots you filtered out.\n"
+        "  'search prefix' expands the prefix to ALL callsign prefixes for that\n"
+        "  DXCC entity and matches the DX callsign (not the spotter).\n"
+        "  Examples: 'search prefix EA' finds EA, EB, EC … (all Spain)\n"
+        "            'search prefix GM' finds GM, MM, 2M (Scotland)\n"
+        "            'search prefix ED' finds EA/EB/EC … (same entity as Spain)\n"
         "\n"
-        "  Examples:\n"
-        "    search freq 14074\n"
-        "    search freq 7040.5\n"
-        "    search call G3SXW\n"
-        "    search call ON4"
+        "  Results are ordered chronologically.  All 24-h spots are logged\n"
+        "  regardless of active filters.\n"
+        "\n"
+        "  Examples using short forms:\n"
+        "    / f 14074          (search freq 14074)\n"
+        "    / c G3SXW          (search call G3SXW)\n"
+        "    / p VK             (search prefix VK)\n"
+        "    / p GM             (search prefix GM)"
     ),
-    "log": "log\n\n  Show spot log statistics (total spots stored, file location).",
+    "callbook": (
+        "callbook <callsign>                        – full details from QRZ/HamQTH\n"
+        "callbook set (s) hamqth <user> <pass>      – save HamQTH credentials\n"
+        "callbook set (s) qrz    <user> <pass>      – save QRZ.com credentials\n"
+        "callbook show (sh)                         – show which services are configured\n"
+        "  (command alias: k)\n"
+        "\n"
+        "  Queries configured callbook service(s) and displays:\n"
+        "    name, QTH, country, grid square, CQ/ITU zone,\n"
+        "    email, website, QSL info (LoTW / eQSL / direct / bureau).\n"
+        "\n"
+        "  Services (configure at least one):\n"
+        "    HamQTH  – free registration at https://www.hamqth.com\n"
+        "    QRZ.com – requires paid XML Data subscription\n"
+        "\n"
+        "  Credentials are stored in the local config file (plain text).\n"
+        "\n"
+        "  Examples using short forms:\n"
+        "    k G3SXW\n"
+        "    k s hamqth myuser mypassword\n"
+        "    k s qrz AA7BQ mypassword\n"
+        "    k sh"
+    ),
+    "log": "log    (alias: l)\n\n  Show spot log statistics (total spots stored, file location).",
     "worked": (
-        "worked <prefix...>  (alias: w)\n"
+        "worked <prefix...>    (alias: w)\n"
         "\n"
         "  Add a DXCC entity to the exclude list.\n"
         "  Resolves full entity prefix set:\n"
@@ -215,21 +267,66 @@ _HELP: dict[str, str] = {
         "  Use 'filter dx include <prefix>' to undo."
     ),
     "stream": (
-        "stream [start|stop]\n"
+        "stream [start|stop]    (alias: s)\n"
         "\n"
-        "  Toggle spot streaming (requires active connection)."
+        "  Toggle spot streaming (requires active connection).\n"
+        "  Examples:  stream   or   s   or   s stop"
     ),
-    "status": "status\n\n  Show connection, filter, and session statistics.",
-    "json":   "json [on|off]\n\n  Toggle NDJSON output (one JSON object per spot).",
-    "nodes":  "nodes\n\n  List all known DXCluster nodes.",
-    "bands":  "bands\n\n  Display the band plan with frequency ranges.",
-    "save":   "save\n\n  Save current settings to disk immediately.",
-    "config": "config\n\n  Show the path of the config file.",
+    "status": "status    (alias: t)\n\n  Show connection, filter, and session statistics.",
+    "json":   "json [on|off]    (alias: j)\n\n  Toggle NDJSON output (one JSON object per spot).",
+    "nodes":  "nodes    (alias: n)\n\n  List all known DXCluster nodes.",
+    "bands":  "bands    (alias: b)\n\n  Display the band plan with frequency ranges.",
+    "save":   "save    (alias: v)\n\n  Save current settings to disk immediately.",
+    "config": "config    (alias: g)\n\n  Show the path of the config file.",
+    "lookup": (
+        "lookup <callsign|prefix>    (alias: u)\n"
+        "\n"
+        "  Offline DXCC lookup: shows entity name, ITU prefix, CQ zone.\n"
+        "  Examples:  lookup VK3IO    or    u VK3IO"
+    ),
+    "disconnect": "disconnect    (alias: d)\n\n  Close the current cluster connection.",
+    "include": (
+        "include <prefix...>    (alias: i)\n"
+        "\n"
+        "  Show only spots whose DX callsign starts with one of the given prefixes.\n"
+        "  Example:  include VK ZL    or    i VK ZL"
+    ),
+    "exclude": (
+        "exclude <prefix...>    (alias: e)\n"
+        "\n"
+        "  Hide spots whose DX callsign starts with one of the given prefixes.\n"
+        "  Example:  exclude W K N    or    e W K N"
+    ),
     "quit":   "quit / exit / q\n\n  Stop streaming and exit.",
+    "help":   "help [command]    (alias: h)\n\n  Show the command list, or detailed help for a specific command.",
 }
+# Make all one-letter aliases resolve to the same help text as their full command.
+_HELP["c"] = _HELP["connect"]
+_HELP["d"] = _HELP["disconnect"]
+_HELP["n"] = _HELP["nodes"]
+_HELP["b"] = _HELP["bands"]
+_HELP["s"] = _HELP["stream"]
+_HELP["f"] = _HELP["filter"]
+_HELP["t"] = _HELP["status"]
+_HELP["j"] = _HELP["json"]
+_HELP["w"] = _HELP["worked"]
+_HELP["i"] = _HELP["include"]
+_HELP["e"] = _HELP["exclude"]
+_HELP["/"] = _HELP["search"]
+_HELP["l"] = _HELP["log"]
+_HELP["u"] = _HELP["lookup"]
+_HELP["k"] = _HELP["callbook"]
+_HELP["v"] = _HELP["save"]
+_HELP["g"] = _HELP["config"]
+_HELP["q"] = _HELP["quit"]
+_HELP["h"] = _HELP["help"]
 
 _MAX_OUTPUT_LINES = 2000  # maximum lines held in _output_lines before trimming
-_OUTPUT_PANE_OVERHEAD = 3  # rows consumed by: status bar (1) + separator (1) + input (1)
+# Rows consumed by the fixed UI elements below the output pane:
+#   status bar (1) + separator (1) + input field (1) + 1 safety margin.
+# The +1 margin prevents the last spot line being clipped by the layout
+# engine when its row-count view differs slightly from the OS terminal size.
+_OUTPUT_PANE_OVERHEAD = 3   # status(1) + separator(1) + input(1)
 
 
 # ── Spot formatter ────────────────────────────────────────────────────────────
@@ -308,6 +405,10 @@ class DXClusterTUI:
         self._app: Optional[Application] = None
         self._log: SpotLog = SpotLog(log_path())
 
+        # Display filter applied in the stream loop (separate from the feed so
+        # the feed delivers every spot to the log regardless of active filters).
+        self._display_filter = build_filter_from_config(self._cfg.filters)
+
         # Each entry: list of (style, text) tuples for one output line
         self._output_lines: list[list] = []
 
@@ -341,42 +442,34 @@ class DXClusterTUI:
         )
 
         # ── Output pane (FormattedTextControl) ───────────────────────────────
+        # get_output_text() is called by prompt_toolkit on every redraw,
+        # including after a terminal resize.  We query the live terminal height
+        # inside the callable (via get_app()) so the visible-line count is
+        # always exact for the current window size — no cursor tricks needed,
+        # no stale cached heights.
+        #
+        # WHY not use get_cursor_position?
+        #   The cursor-pin approach only guarantees the cursor is *somewhere*
+        #   in the visible range, not pinned to the bottom.  After the window
+        #   grows, prompt_toolkit sees the cursor is still visible and leaves
+        #   vertical_scroll unchanged, so new spots drift away from the bottom.
+        #   Returning exactly the right number of lines avoids the problem
+        #   entirely: vertical_scroll stays at 0 and everything fits perfectly.
+
         def get_output_text():
-            """Produce the formatted text for the output pane.
-
-            Called by prompt_toolkit on every redraw.  We return only the
-            last N lines (where N = terminal height minus fixed overhead rows)
-            so the pane auto-scrolls to the bottom without maintaining an
-            explicit scroll offset.
-
-            WHY shutil.get_terminal_size() instead of using the Application's
-            own output.get_size()?
-              get_terminal_size() is simpler and available synchronously.  The
-              Application's output object requires going through the event loop,
-              which is overkill for this purpose.  In practice both return the
-              same value.
-
-            WHY insert "\n" between lines rather than in each parts list?
-              FormattedTextControl concatenates all the (style, text) pairs
-              into a single run of styled text.  Newlines must be inserted
-              explicitly between lines; they are not added automatically.
-              We add the newline separator between entries (not after the last
-              one) so there is no trailing blank line at the bottom of the pane.
-            """
+            """Return exactly as many lines as the output pane can show."""
             try:
-                rows = shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD
+                rows = get_app().output.get_size().rows
             except Exception:
-                rows = 40
-            visible = max(5, rows)
+                rows = 24
+            visible = max(1, rows - _OUTPUT_PANE_OVERHEAD)
             total = len(self._output_lines)
 
             if self._scroll_offset > 0:
-                # Scrolled up: show a window ending scroll_offset lines before the end.
-                end = max(0, total - self._scroll_offset)
+                end   = max(0, total - self._scroll_offset)
                 start = max(0, end - visible)
                 lines = self._output_lines[start:end]
             else:
-                # Auto-scroll: always show the most recent lines.
                 lines = self._output_lines[-visible:]
 
             result = []
@@ -458,7 +551,7 @@ class DXClusterTUI:
         @kb.add("pageup")
         def _scroll_up(event):
             try:
-                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+                page = max(5, event.app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD)
             except Exception:
                 page = 20
             self._scroll_offset = min(
@@ -470,7 +563,7 @@ class DXClusterTUI:
         @kb.add("pagedown")
         def _scroll_down(event):
             try:
-                page = max(5, shutil.get_terminal_size().lines - _OUTPUT_PANE_OVERHEAD)
+                page = max(5, event.app.output.get_size().rows - _OUTPUT_PANE_OVERHEAD)
             except Exception:
                 page = 20
             self._scroll_offset = max(0, self._scroll_offset - page)
@@ -630,6 +723,7 @@ class DXClusterTUI:
         parts = line.split()
         cmd, args = parts[0].lower(), parts[1:]
         table = {
+            # full names
             "help":       self._cmd_help,
             "connect":    self._cmd_connect,
             "disconnect": self._cmd_disconnect,
@@ -640,17 +734,36 @@ class DXClusterTUI:
             "status":     self._cmd_status,
             "json":       self._cmd_json,
             "worked":     self._cmd_worked,
-            "w":          self._cmd_worked,
             "include":    self._cmd_include,
             "exclude":    self._cmd_exclude,
             "search":     self._cmd_search,
             "log":        self._cmd_log,
             "lookup":     self._cmd_lookup,
+            "callbook":   self._cmd_callbook,
             "save":       self._cmd_save,
             "config":     self._cmd_config,
             "quit":       self._cmd_quit,
             "exit":       self._cmd_quit,
-            "q":          self._cmd_quit,
+            # one-letter aliases
+            "h": self._cmd_help,
+            "c": self._cmd_connect,
+            "d": self._cmd_disconnect,
+            "n": self._cmd_nodes,
+            "b": self._cmd_bands,
+            "f": self._cmd_filter,
+            "s": self._cmd_stream,
+            "t": self._cmd_status,
+            "j": self._cmd_json,
+            "w": self._cmd_worked,
+            "i": self._cmd_include,
+            "e": self._cmd_exclude,
+            "/": self._cmd_search,
+            "l": self._cmd_log,
+            "u": self._cmd_lookup,
+            "k": self._cmd_callbook,
+            "v": self._cmd_save,
+            "g": self._cmd_config,
+            "q": self._cmd_quit,
         }
         handler = table.get(cmd)
         if handler:
@@ -672,23 +785,27 @@ class DXClusterTUI:
                 self._print(f"No help for '{topic}'.  Topics: {', '.join(_HELP)}")
             return
         self._print("")
-        self._print("Commands:")
-        self._print("  connect  <node|host> [call] [port]  – connect to a cluster")
-        self._print("  nodes                               – list known nodes")
-        self._print("  bands                               – show band plan")
-        self._print("  stream   [start|stop]               – toggle live spot stream")
-        self._print("  filter   band|mode|zone|spotter zone|dx|show|clear")
-        self._print("  worked   <prefix…>  (alias: w)      – add to worked/exclude list")
-        self._print("  include  <prefix…>                  – add to include whitelist")
-        self._print("  exclude  <prefix…>                  – add to exclude blacklist")
-        self._print("  status                              – connection & filter summary")
-        self._print("  json     [on|off]                   – toggle JSON output")
-        self._print("  lookup   <callsign|prefix>          – show country and CQ zone")
-        self._print("  save                                – save settings now")
-        self._print("  config                              – show config file path")
-        self._print("  quit                                – exit")
+        self._print("Commands (short alias shown in brackets):")
+        self._print("  [c] connect  <node|host> [call] [port]  – connect to a cluster")
+        self._print("  [d] disconnect                          – close connection")
+        self._print("  [n] nodes                               – list known nodes")
+        self._print("  [b] bands                               – show band plan")
+        self._print("  [s] stream   [start|stop]               – toggle live spot stream")
+        self._print("  [f] filter   band|mode|zone|clear|show  – spot filters")
+        self._print("  [w] worked   <prefix…>                  – add to worked/exclude list")
+        self._print("  [i] include  <prefix…>                  – show only these prefixes")
+        self._print("  [e] exclude  <prefix…>                  – hide these prefixes")
+        self._print("  [/] search   freq|call|prefix <value>   – search 24-h spot log")
+        self._print("  [l] log                                 – spot log statistics")
+        self._print("  [t] status                              – connection & filter summary")
+        self._print("  [j] json     [on|off]                   – toggle JSON output")
+        self._print("  [u] lookup   <callsign|prefix>          – offline DXCC lookup")
+        self._print("  [k] callbook <callsign>                 – full lookup via QRZ/HamQTH")
+        self._print("  [v] save                                – save settings now")
+        self._print("  [g] config                              – show config file path")
+        self._print("  [q] quit                                – exit")
         self._print("")
-        self._print("Type 'help <command>' for details.  Settings auto-save on every change.")
+        self._print("Type 'help <command>' for details, e.g. 'help f' or 'help filter'.")
         self._print("")
 
     async def _cmd_connect(self, args: list[str]) -> None:
@@ -762,16 +879,18 @@ class DXClusterTUI:
         if not args:
             self._print(
                 "Usage: filter <band|mode|dx|show|clear> [values…]\n"
-                "  filter band 20m 40m\n"
-                "  filter mode CW FT8 SSB\n"
-                "  filter dx include VK ZL\n"
-                "  filter dx exclude G ON DL\n"
-                "  filter show\n"
-                "  filter clear"
+                "  f b 20m 40m           – band filter (b=band)\n"
+                "  f m CW FT8 SSB        – mode filter (m=mode)\n"
+                "  f d i VK ZL           – dx include   (d=dx, i=include)\n"
+                "  f d e G ON DL         – dx exclude   (d=dx, e=exclude)\n"
+                "  f z a 14 15           – zone add     (z=zone, a=add)\n"
+                "  f s                   – show filters (s=show)\n"
+                "  f c                   – clear all    (c=clear)"
             )
             return
 
-        sub    = args[0].lower()
+        _FILTER_SUBS = {"b": "band", "m": "mode", "z": "zone", "d": "dx", "s": "show", "c": "clear"}
+        sub    = _FILTER_SUBS.get(args[0].lower(), args[0].lower())
         values = args[1:]
 
         if sub == "show":
@@ -823,9 +942,10 @@ class DXClusterTUI:
 
         elif sub == "dx":
             if not values:
-                self._print("Usage: filter dx include|exclude <prefix…>")
+                self._print("Usage: filter dx include|exclude <prefix…>  (i=include, e=exclude)")
                 return
-            direction = values[0].lower()
+            _DX_DIRS = {"i": "include", "e": "exclude"}
+            direction = _DX_DIRS.get(values[0].lower(), values[0].lower())
             prefixes  = values[1:]
             if not prefixes:
                 self._print(f"Usage: filter dx {direction} <prefix…>")
@@ -835,13 +955,13 @@ class DXClusterTUI:
             elif direction == "exclude":
                 await self._do_exclude(prefixes)
             else:
-                self._print("Usage: filter dx include|exclude <prefix…>")
+                self._print("Usage: filter dx include|exclude <prefix…>  (i=include, e=exclude)")
             return  # include/exclude already call save and apply
 
         else:
             self._print(
                 f"Unknown filter sub-command '{sub}'.\n"
-                "  Use: band, mode, zone, dx include/exclude, show, clear"
+                "  Use: band (b), mode (m), zone (z), dx (d) include/exclude, show (s), clear (c)"
             )
             return
 
@@ -874,15 +994,16 @@ class DXClusterTUI:
         if not args:
             self._print(
                 f"Usage: {cmd_pfx} <add|remove|open|close|show> [zone...]\n"
-                f"  {cmd_pfx} open          – accept all zones (default)\n"
-                f"  {cmd_pfx} close         – reject all zones\n"
-                f"  {cmd_pfx} add 14 15     – add zones to allow list\n"
-                f"  {cmd_pfx} remove 14     – remove zone from allow list\n"
-                f"  {cmd_pfx} show          – display current zone filter"
+                f"  {cmd_pfx} o             – open: accept all zones (o=open)\n"
+                f"  {cmd_pfx} x             – close: reject all zones (x=close)\n"
+                f"  {cmd_pfx} a 14 15       – add zones to allow list (a=add)\n"
+                f"  {cmd_pfx} r 14          – remove zone from allow list (r=remove)\n"
+                f"  {cmd_pfx} s             – show current zone filter (s=show)"
             )
             return
 
-        sub = args[0].lower()
+        _ZONE_SUBS = {"a": "add", "r": "remove", "o": "open", "x": "close", "s": "show"}
+        sub = _ZONE_SUBS.get(args[0].lower(), args[0].lower())
 
         def get_zones():
             return self._cfg.filters.spotter_cq_zones if is_spotter else self._cfg.filters.cq_zones
@@ -960,18 +1081,19 @@ class DXClusterTUI:
         self._print(f"Unknown zone sub-command '{sub}'.  Use: add, remove, open, close, show")
 
     async def _cmd_search(self, args: list[str]) -> None:
-        """search freq <kHz> | search call <pattern>"""
+        """search freq <kHz> | search call <pattern> | search prefix <prefix>"""
         if len(args) < 2:
             self._print(
                 "Usage:\n"
-                "  search freq <kHz>       – spots within ±5 kHz in last 24 h\n"
-                "  search call <pattern>   – spots matching callsign pattern\n"
-                "  search call G3SXW\n"
-                "  search freq 14074"
+                "  search freq <kHz>       (/ f <kHz>)    – spots within ±5 kHz in last 24 h\n"
+                "  search call <pattern>   (/ c <call>)   – spots matching callsign pattern\n"
+                "  search prefix <prefix>  (/ p <prefix>) – all spots from the same DXCC entity\n"
+                "Examples:  / f 14074   / c G3SXW   / p VK"
             )
             return
 
-        sub = args[0].lower()
+        _SEARCH_SUBS = {"f": "freq", "c": "call", "p": "prefix"}
+        sub = _SEARCH_SUBS.get(args[0].lower(), args[0].lower())
 
         if sub == "freq":
             try:
@@ -1007,8 +1129,39 @@ class DXClusterTUI:
                 )
             self._print("─" * 78)
 
+        elif sub == "prefix":
+            from dxcluster.dxcc import all_prefixes_for, entity_name, resolve_entity as _resolve
+            user_pfx = args[1]
+            entity_key = _resolve(user_pfx)
+            if entity_key is None:
+                self._print(
+                    f"Unknown prefix '{user_pfx}'.  "
+                    "Try 'lookup <prefix>' to check what entity a prefix maps to."
+                )
+                return
+            country = entity_name(entity_key)
+            pfx_list = all_prefixes_for(user_pfx)  # e.g. ["EA","EB","EC",...] for Spain
+            results = self._log.search_entity(pfx_list)
+            if not results:
+                self._print(
+                    f"No spots from {country} ({', '.join(pfx_list[:6])}"
+                    f"{'…' if len(pfx_list) > 6 else ''}) in the last 24 hours."
+                )
+                return
+            self._print(
+                f"Spots from {country} ({', '.join(pfx_list[:6])}"
+                f"{'…' if len(pfx_list) > 6 else ''}) — last 24 h ({len(results)} found):"
+            )
+            self._print("─" * 78)
+            for s in results:
+                ts = s.received_at.strftime("%H:%M")
+                self._write_line(
+                    [("ansidarkgray", f"{ts} ")] + _format_spot_parts(s)
+                )
+            self._print("─" * 78)
+
         else:
-            self._print(f"Unknown search type '{sub}'.  Use: freq, call")
+            self._print(f"Unknown search type '{sub}'.  Use: freq (f), call (c), prefix (p)")
 
     async def _cmd_log(self, args: list[str]) -> None:
         self._print(f"Spot log: {self._log.size()} spots stored (last 24 h)")
@@ -1032,6 +1185,126 @@ class DXClusterTUI:
                 ("ansibrightyellow", f"{zone_str:<14} "),
                 ("ansigray",         prefixes),
             ])
+
+    async def _cmd_callbook(self, args: list[str]) -> None:
+        """callbook <callsign> | callbook set <service> <user> <pass> | callbook show"""
+        if not args:
+            self._print("Usage: callbook <callsign>  |  k set hamqth/qrz <user> <pass>  |  k sh")
+            return
+
+        _CB_SUBS = {"s": "set", "sh": "show"}
+        sub = _CB_SUBS.get(args[0].lower(), args[0].lower())
+
+        # ── callbook show ──────────────────────────────────────────────────────
+        if sub == "show":
+            cb = self._cfg.callbook
+            self._print("Callbook services:")
+            if cb.hamqth_user:
+                self._write_line([("ansibrightgreen", "  HamQTH  "), ("ansiwhite", f"configured ({cb.hamqth_user})")])
+            else:
+                self._write_line([("ansigray", "  HamQTH  "), ("ansigray", "not configured  (callbook set hamqth <user> <pass>)")])
+            if cb.qrz_user:
+                self._write_line([("ansibrightgreen", "  QRZ.com "), ("ansiwhite", f"configured ({cb.qrz_user})")])
+            else:
+                self._write_line([("ansigray", "  QRZ.com "), ("ansigray", "not configured  (callbook set qrz <user> <pass>)")])
+            return
+
+        # ── callbook set <service> <user> <pass> ──────────────────────────────
+        if sub == "set":
+            if len(args) < 4:
+                self._print("Usage: callbook set hamqth <username> <password>\n"
+                            "       callbook set qrz <username> <password>")
+                return
+            svc  = args[1].lower()
+            user = args[2]
+            pwd  = args[3]
+            if svc == "hamqth":
+                self._cfg.callbook.hamqth_user = user
+                self._cfg.callbook.hamqth_pass = pwd
+                save_config(self._cfg)
+                self._print(f"HamQTH credentials saved for user '{user}'.")
+            elif svc == "qrz":
+                self._cfg.callbook.qrz_user = user
+                self._cfg.callbook.qrz_pass = pwd
+                save_config(self._cfg)
+                self._print(f"QRZ.com credentials saved for user '{user}'.")
+            else:
+                self._print(f"Unknown service '{svc}'.  Use: hamqth  or  qrz")
+            return
+
+        # ── callbook <callsign> ────────────────────────────────────────────────
+        # Anything that is not a sub-command keyword is treated as a callsign.
+        callsign = args[0].upper()
+        cb = self._cfg.callbook
+
+        if not cb.hamqth_user and not cb.qrz_user:
+            self._print(
+                "No callbook service configured.\n"
+                "  callbook set hamqth <username> <password>   (free registration at hamqth.com)\n"
+                "  callbook set qrz    <username> <password>   (requires QRZ XML subscription)"
+            )
+            return
+
+        self._print(f"Looking up {callsign}…")
+        if self._app:
+            self._app.invalidate()
+
+        results_shown = 0
+
+        # Try HamQTH first (free, usually faster).
+        if cb.hamqth_user:
+            entry = await lookup_hamqth(callsign, cb.hamqth_user, cb.hamqth_pass)
+            if entry.error:
+                self._write_line([("ansiyellow", f"  HamQTH: "), ("ansigray", entry.error)])
+            else:
+                self._display_callbook_entry(entry)
+                results_shown += 1
+
+        # Try QRZ.com if configured (and HamQTH either failed or wasn't configured).
+        if cb.qrz_user and results_shown == 0:
+            entry = await lookup_qrz(callsign, cb.qrz_user, cb.qrz_pass)
+            if entry.error:
+                self._write_line([("ansiyellow", f"  QRZ.com: "), ("ansigray", entry.error)])
+            else:
+                self._display_callbook_entry(entry)
+                results_shown += 1
+
+        if results_shown == 0:
+            self._print(f"No callbook data found for {callsign}.")
+
+    def _display_callbook_entry(self, e) -> None:
+        """Render a CallbookEntry as coloured lines in the output pane."""
+        self._write_line([
+            ("ansibrightgreen", f"  [{e.source}] "),
+            ("ansiwhite bold",  f"{e.callsign}  "),
+            ("ansiwhite",       e.name),
+        ])
+        if e.qth or e.country:
+            loc = ", ".join(p for p in [e.qth, e.country] if p)
+            self._write_line([("ansigray", "  QTH     : "), ("ansicyan", loc)])
+        if e.grid:
+            self._write_line([("ansigray", "  Grid    : "), ("ansiwhite", e.grid)])
+        zone_parts = []
+        if e.cq_zone:
+            zone_parts.append(f"CQ {e.cq_zone}")
+        if e.itu_zone:
+            zone_parts.append(f"ITU {e.itu_zone}")
+        if zone_parts:
+            self._write_line([("ansigray", "  Zone    : "), ("ansibrightyellow", "  ".join(zone_parts))])
+        if e.email:
+            self._write_line([("ansigray", "  Email   : "), ("ansiwhite", e.email)])
+        if e.web:
+            self._write_line([("ansigray", "  Web     : "), ("ansiwhite", e.web)])
+        # Build QSL flags line
+        qsl_parts = []
+        if e.lotw:        qsl_parts.append("LoTW")
+        if e.eqsl:        qsl_parts.append("eQSL")
+        if e.qsl_direct:  qsl_parts.append("Direct")
+        if e.qsl_bureau:  qsl_parts.append("Bureau")
+        if qsl_parts:
+            self._write_line([("ansigray", "  QSL     : "), ("ansibrightgreen", "  ".join(qsl_parts))])
+        elif any([e.lotw, e.eqsl, e.qsl_direct, e.qsl_bureau]) is False:
+            self._write_line([("ansigray", "  QSL     : "), ("ansidarkgray", "no QSL info available")])
 
     async def _cmd_stream(self, args: list[str]) -> None:
         sub = args[0].lower() if args else None
@@ -1133,15 +1406,15 @@ class DXClusterTUI:
     # ── Stream management ─────────────────────────────────────────────────────
 
     def _apply_filter_to_feed(self) -> None:
-        """Rebuild the SpotFilter from the current config and push it to the feed.
+        """Rebuild the display filter from the current config.
 
-        Called whenever a filter setting changes while a stream is running.
-        build_filter_from_config() returns None if no filters are active,
-        which SpotFeed interprets as "accept all spots" — slightly more
-        efficient than an empty SpotFilter with zero predicates.
+        The feed itself is unfiltered — every spot from the cluster is logged
+        to the 24-hour rolling log regardless of active filters.  This method
+        updates only self._display_filter, which the stream loop checks before
+        rendering a spot to the output pane.  That way search commands always
+        have access to the full 24-hour history even after filter changes.
         """
-        if self._feed:
-            self._feed.spot_filter = build_filter_from_config(self._cfg.filters)
+        self._display_filter = build_filter_from_config(self._cfg.filters)
 
     async def _start_stream(self) -> None:
         """Create a fresh SpotFeed and launch the background streaming task.
@@ -1162,7 +1435,8 @@ class DXClusterTUI:
             host=c.host,
             port=c.port,
             callsign=c.callsign,
-            spot_filter=build_filter_from_config(self._cfg.filters),
+            # No filter here — ALL spots reach the log and search commands.
+            # Display filtering is applied in the stream loop via _display_filter.
             reconnect=True,  # auto-reconnect on connection loss
         )
         self._streaming = True
@@ -1210,14 +1484,18 @@ class DXClusterTUI:
         This coroutine runs as a concurrent task alongside the prompt_toolkit
         Application event loop.  For each spot received:
           1. Increment the spot counter (shown in the status bar).
-          2. Log the spot to the 24-hour rolling log (BEFORE any display filter
-             so that search results include filtered-out spots).
-          3. Format and display the spot (or its JSON representation in JSON mode).
+          2. Log the spot to the 24-hour rolling log unconditionally — before
+             any display filter — so that search results always cover the full
+             24-hour history regardless of what filters are active.
+          3. Check self._display_filter.  If the spot does not pass, skip
+             rendering and move on to the next spot.
+          4. Render the spot to the output pane (formatted columns or JSON).
 
-        The spot is logged regardless of display filters because the user may
-        want to search for a spot they had previously filtered out.  For
-        example, if the user filtered to 20m only, a 40m spot would be hidden
-        from the live stream but would still appear in 'search freq 7040'.
+        The deliberate split between logging (step 2) and display (steps 3–4)
+        means the user can freely change filters mid-session without losing
+        historical data.  For example, with a 20m-only filter active, a 40m
+        spot is hidden from the live stream but remains searchable via
+        'search freq 7040' or 'search prefix VK'.
 
         Exception handling:
           asyncio.CancelledError – clean stop via _stop_stream() or app exit.
@@ -1228,12 +1506,13 @@ class DXClusterTUI:
         try:
             async for spot in self._feed.spots():
                 self._spot_count += 1
-                # Log ALL spots regardless of active display filters.
-                # The SpotFeed applies filters before yielding, so spots that
-                # were filtered out by the user never reach this loop.
-                # However, we still log everything that passes the filter —
-                # the filter is applied by SpotFeed, not here.
+                # Log ALL spots unconditionally — the feed is unfiltered so
+                # that search commands always have the full 24-hour history
+                # regardless of what display filters are currently active.
                 self._log.append(spot)
+                # Apply the display filter here, not in SpotFeed.
+                if self._display_filter and not self._display_filter(spot):
+                    continue
                 if self._json_mode:
                     self._write_line([("", spot.to_json())])
                 else:

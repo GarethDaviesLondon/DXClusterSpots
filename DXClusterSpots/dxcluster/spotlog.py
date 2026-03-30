@@ -240,6 +240,51 @@ class SpotLog:
             key=lambda s: s.received_at,
         )
 
+    def search_entity(
+        self,
+        prefixes: list[str],
+        hours: float = 24,
+    ) -> List[DXSpot]:
+        """Return all spots where the DX callsign starts with any of *prefixes*.
+
+        Used by the 'search prefix' command to find all spots from a DXCC
+        entity.  The caller expands a user-supplied prefix (e.g. "GM") into
+        the full set of callsign prefixes for that entity (e.g. ["GM", "MM",
+        "2M"] for Scotland) using dxcc.all_prefixes_for(), then passes the
+        full list here.
+
+        Matching is start-of-string rather than substring to avoid false
+        positives: prefix "G" should not match "GM3ABC" (Scotland), and
+        prefix "EA" should not match "EA8XYZ" (Canary Islands).
+
+        WHY not use resolve_entity() per spot?
+            Calling resolve_entity() on every spot callsign in the loop would
+            do a DXCC database lookup for each of potentially tens of thousands
+            of entries.  Prefix-startswith matching against the pre-expanded
+            prefix list is much faster — a simple string operation per spot
+            with no dict lookups.
+
+        Args:
+            prefixes: List of callsign prefixes to match against (will be
+                      upper-cased internally).  Typically obtained by calling
+                      dxcc.all_prefixes_for(user_input).
+            hours:    How many hours back to search (default 24).
+
+        Returns:
+            Spots ordered chronologically (oldest first), as with all other
+            search methods in this class.
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        upper_prefixes = [p.upper() for p in prefixes]
+        return sorted(
+            [
+                s for s in self._spots
+                if s.received_at >= cutoff
+                and any(s.dx_callsign.startswith(p) for p in upper_prefixes)
+            ],
+            key=lambda s: s.received_at,
+        )
+
     def size(self) -> int:
         """Return the number of spots currently held in the in-memory log."""
         return len(self._spots)
